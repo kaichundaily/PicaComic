@@ -16,9 +16,9 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.2.8+228
+version: 4.0.4+404
 environment:
-  sdk: '>=3.0.0'
+  sdk: '>=3.3.0'
 
 # Dependencies specify other packages that your package needs in order to work.
 # To automatically upgrade your package dependencies to the latest versions
@@ -29,41 +29,33 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  dio: 5.3.3
+  dio: 5.4.1
   shared_preferences: ^2.0.16
-  dynamic_color: ^1.6.5
-  cached_network_image: ^3.2.3
-  cupertino_icons: ^1.0.2
+  dynamic_color: ^1.6.9
   crypto: any
   pointycastle: ^3.7.3
   uuid: ^3.0.7
   photo_view:
     git:
       url: https://github.com/wgh136/photo_view
-      ref: main
+      ref: 94724a0b
   url_launcher: ^6.1.8
   path_provider: ^2.0.12
-  file_selector: ^1.0.0
+  file_selector: ^1.0.1
   image_picker: ^1.0.2
-  flutter_cache_manager: any
   image_gallery_saver:
     git:
       url: https://github.com/wgh136/image_gallery_saver
       ref: master
   flutter_file_dialog: 3.0.1
-  archive: any
-  flutter_local_notifications: ^16.1.0
+  flutter_local_notifications: ^17.2.2
   share_plus: ^7.0.0
-  local_auth: ^2.1.6
+  local_auth: ^2.3.0
   html: any
   dio_cookie_manager: any
-  image: ^4.1.0
+  image: 4.1.0
   shimmer_animation: ^2.1.0
   cookie_jar: any
-  flutter_windows_webview:
-    git:
-      url: https://github.com/wgh136/flutter_windows_webview
-      ref: master
   workmanager:
     git:
       url: https://github.com/wgh136/flutter_workmanager
@@ -73,20 +65,39 @@ dependencies:
   intl: any
   flutter_displaymode: 0.6.0
   app_links: 3.4.3
-  flutter_reorderable_grid_view: 5.0.0-dev.7
-  lottie: any
-  webview_flutter: any
-  webview_cookie_manager:
-    git:
-      url: https://github.com/wgh136/webview_cookie_manager
-      ref: master
-  webview_flutter_android: any
+  flutter_reorderable_grid_view: 5.0.1
   webdav_client:
     git:
       url: https://github.com/wgh136/webdav_client
       ref: main
-  sliver_tools: any
-  dio_http2_adapter: ^2.3.1+1
+  dio_http2_adapter: 2.3.1+1
+  sqlite3: 2.1.0
+  sqlite3_flutter_libs: any
+  zip_flutter:
+    git:
+      url: https://github.com/wgh136/zip_flutter
+      ref: 92b7309e
+  collection: ^1.18.0
+  window_manager:
+  flutter_inappwebview: 6.0.0
+  pdf: ^3.10.8
+  flutter_qjs:
+    git:
+      url: https://github.com/wgh136/flutter_qjs
+      ref: ade0b9d
+  sliver_tools: ^0.2.12
+  mime: ^1.0.5
+  desktop_webview_window:
+    git:
+      url: https://github.com/wgh136/flutter_desktop_webview
+      path: packages/desktop_webview_window
+
+dependency_overrides:
+  flutter_inappwebview_android:
+    git:
+      url: https://github.com/holzgeist/flutter_inappwebview
+      path: flutter_inappwebview_android
+      ref: d89b1d32638b49dfc58c4b7c84153be0c269d057
 
 dev_dependencies:
   flutter_test:
@@ -98,6 +109,18 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^2.0.0
+  flutter_to_arch:
+    git: https://github.com/wgh136/flutter_to_arch
+
+flutter_to_arch:
+  name: Pica Comic
+  icon: debian/gui/pica-comic.png
+  categories: Utility
+  keywords: Flutter;comic;images;
+  url: https://github.com/wgh136/PicaComic
+  depends:
+    - gtk3
+    - webkit2gtk-4.1
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -120,11 +143,11 @@ flutter:
     - images/avatar.png
     - images/avatar_small.png
     - images/github.png
-    - images/collections.jpg
-    - images/help.jpg
-    - images/latest.png
-    - images/loading.json
+    - images/app_icon_no_bg.png
     - assets/tags.json
+    - assets/translation.json
+    - assets/init.js
+    - assets/tags_tw.json
   # For details regarding adding assets from package dependencies, see
   # https://flutter.dev/assets-and-images/#from-packages
 
@@ -147,18 +170,3 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/custom-fonts/#from-packages
-
-  fonts:
-    # 这是在windows端使用的字体, 由于系统字体(微软雅黑)在Flutter App上显示效果极差, 因此使用此字体
-    # 仅在打包windows时取消注释
-    #- family: font
-    #  fonts:
-    #    - asset: fonts/NotoSansSC-Regular.otf
-
-    # 这是一个英文字体, 文件很小, 无需担心体积, 用于显示Pica Comic
-    - family: font2
-      fonts:
-        - asset: fonts/Poppins-Regular.ttf
-    - family:  MyIcons
-      fonts:
-       - asset: fonts/MyIcons.ttf

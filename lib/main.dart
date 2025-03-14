@@ -1,62 +1,65 @@
 import 'dart:async';
-import 'dart:io';
-import 'package:app_links/app_links.dart';
+
+import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:dynamic_color/dynamic_color.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_displaymode/flutter_displaymode.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:pica_comic/base.dart';
+import 'package:pica_comic/components/window_frame.dart';
 import 'package:pica_comic/foundation/app.dart';
-import 'package:pica_comic/network/nhentai_network/nhentai_main_network.dart';
-import 'package:pica_comic/tools/app_links.dart';
-import 'package:pica_comic/tools/background_service.dart';
-import 'package:pica_comic/tools/block_screenshot.dart';
-import 'package:pica_comic/tools/cache_auto_clear.dart';
-import 'package:pica_comic/tools/io_tools.dart';
+import 'package:pica_comic/foundation/app_page_route.dart';
 import 'package:pica_comic/foundation/log.dart';
+import 'package:pica_comic/init.dart';
+import 'package:pica_comic/network/http_client.dart';
+import 'package:pica_comic/pages/auth_page.dart';
+import 'package:pica_comic/pages/main_page.dart';
+import 'package:pica_comic/pages/welcome_page.dart';
+import 'package:pica_comic/tools/block_screenshot.dart';
 import 'package:pica_comic/tools/mouse_listener.dart';
-import 'package:pica_comic/network/proxy.dart';
 import 'package:pica_comic/tools/tags_translation.dart';
-import 'package:pica_comic/views/app_views/auth_page.dart';
-import 'package:pica_comic/views/main_page.dart';
-import 'package:pica_comic/views/welcome_page.dart';
-import 'package:pica_comic/network/jm_network/jm_network.dart';
-import 'package:workmanager/workmanager.dart';
-import 'network/picacg_network/methods.dart';
+import 'package:window_manager/window_manager.dart';
+
+import 'components/components.dart';
 import 'network/webdav.dart';
 
 bool notFirstUse = false;
 
-void main() {
-  runZonedGuarded(() {
+void main(List<String> args) {
+  if (runWebViewTitleBarWidget(args)) {
+    return;
+  }
+  runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
-    startClearCache();
-    if (App.isAndroid) {
-      final appLinks = AppLinks();
-      appLinks.allUriLinkStream.listen((uri) {
-        handleAppLinks(uri);
-      });
-    }
+    await init();
     FlutterError.onError = (details) {
       LogManager.addLog(LogLevel.error, "Unhandled Exception",
           "${details.exception}\n${details.stack}");
     };
-    appdata.readData().then((b) async {
-      if (App.isMobile) {
-        Workmanager().initialize(
-          onStart,
+    notFirstUse = appdata.firstUse[3] == "1";
+    setNetworkProxy();
+    runApp(const MyApp());
+    if (App.isDesktop) {
+      await windowManager.ensureInitialized();
+      windowManager.waitUntilReadyToShow().then((_) async {
+        await windowManager.setTitleBarStyle(
+          TitleBarStyle.hidden,
+          windowButtonVisibility: App.isMacOS,
         );
-      }
-      await checkDownloadPath();
-      notFirstUse = appdata.firstUse[3] == "1";
-      if (b) {
-        network = PicacgNetwork(appdata.token);
-      }
-      setNetworkProxy(); //设置代理
-      runApp(const MyApp());
-    });
+        if (App.isLinux) {
+          await windowManager.setBackgroundColor(Colors.transparent);
+        }
+        await windowManager.setMinimumSize(const Size(500, 600));
+        if (!App.isLinux) {
+          // https://github.com/leanflutter/window_manager/issues/460
+          var placement = await WindowPlacement.loadFromFile();
+          await placement.applyToWindow();
+          await windowManager.show();
+          WindowPlacement.loop();
+        }
+      });
+    }
   }, (error, stack) {
     LogManager.addLog(LogLevel.error, "Unhandled Exception", "$error\n$stack");
   });
@@ -76,8 +79,27 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   bool forceRebuild = false;
 
+  OverlayEntry? hideContentOverlay;
+
+  void hideContent() {
+    if (hideContentOverlay != null) return;
+    hideContentOverlay = OverlayEntry(
+        builder: (context) => Container(
+              width: MediaQuery.of(context).size.width,
+              height: MediaQuery.of(context).size.width,
+              color: Theme.of(context).colorScheme.surface,
+            ));
+    OverlayWidget.addOverlay(hideContentOverlay!);
+  }
+
+  void showContent() {
+    hideContentOverlay = null;
+    OverlayWidget.removeAll();
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    bool enableAuth = appdata.settings[13] == "1";
     if (App.isAndroid && appdata.settings[38] == "1") {
       try {
         FlutterDisplayMode.setHighRefreshRate();
@@ -85,76 +107,68 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         // ignore
       }
     }
-    setNetworkProxy(); //当App从后台进入前台, 代理设置可能发生变更
-    if (state == AppLifecycleState.resumed) {
-      if (appdata.settings[13] == "1" && appdata.flag && !AuthPage.lock) {
-        appdata.flag = false;
-        App.to(App.globalContext!, () => const AuthPage());
+    setNetworkProxy();
+    scheduleMicrotask(() {
+      if (state == AppLifecycleState.hidden && enableAuth) {
+        if (!AuthPage.lock && appdata.settings[13] == "1") {
+          AuthPage.initial = false;
+          AuthPage.lock = true;
+          App.to(App.globalContext!, () => const AuthPage());
+        }
       }
-    } else if (state == AppLifecycleState.paused) {
-      appdata.flag = true;
-    }
 
-    if (DateTime.now().millisecondsSinceEpoch - time.millisecondsSinceEpoch >
-        7200000) {
-      JmNetwork().loginFromAppdata();
-      Webdav.syncData();
-      time = DateTime.now();
-    }
+      if (state == AppLifecycleState.inactive && enableAuth) {
+        hideContent();
+      } else if (state == AppLifecycleState.resumed) {
+        showContent();
+        Future.delayed(const Duration(milliseconds: 200), checkClipboard);
+      }
 
-    App.onAppLifeCircleChanged?.call();
+      if (DateTime.now().millisecondsSinceEpoch - time.millisecondsSinceEpoch >
+          7200000) {
+        Webdav.syncData();
+        time = DateTime.now();
+      }
+    });
   }
 
   @override
   void initState() {
-    MyApp.updater = () => setState(() {
-          forceRebuild = true;
-        });
+    MyApp.updater = () => setState(() => forceRebuild = true);
     time = DateTime.now();
     TagsTranslation.readData();
     if (App.isAndroid && appdata.settings[38] == "1") {
       try {
         FlutterDisplayMode.setHighRefreshRate();
-      } catch (e) {
-        // ignore
-      }
+      } finally {}
     }
     listenMouseSideButtonToBack();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     WidgetsBinding.instance.addObserver(this);
-    downloadManager.init(); //初始化下载管理器
-    notifications.init(); //初始化通知管理器
-    NhentaiNetwork().init();
-    JmNetwork().init();
+    notifications.init();
     if (appdata.settings[12] == "1") {
       blockScreenshot();
     }
-    (() async => appdataPath = (await getApplicationSupportDirectory()).path)
-        .call();
+    PaintingBinding.instance.imageCache.maximumSizeBytes = 200 * 1024 * 1024;
     super.initState();
   }
 
   @override
   void didChangePlatformBrightness() {
-    final Brightness brightness =
-        View.of(context).platformDispatcher.platformBrightness;
-    if (brightness == Brightness.light) {
-      SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-          systemNavigationBarColor: Colors.transparent,
-          statusBarColor: Colors.transparent,
-          statusBarBrightness: Brightness.dark,
-          statusBarIconBrightness: Brightness.dark,
-          systemNavigationBarIconBrightness: Brightness.dark,
-          systemNavigationBarContrastEnforced: false));
+    setState(() {});
+  }
+
+  (ColorScheme, ColorScheme) _generateColorSchemes(
+      ColorScheme? light, ColorScheme? dark) {
+    Color? color;
+    if (int.parse(appdata.settings[27]) != 0) {
+      color = colors[int.parse(appdata.settings[27]) - 1];
     } else {
-      SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-          systemNavigationBarColor: Colors.transparent,
-          statusBarColor: Colors.transparent,
-          statusBarBrightness: Brightness.light,
-          statusBarIconBrightness: Brightness.light,
-          systemNavigationBarIconBrightness: Brightness.light,
-          systemNavigationBarContrastEnforced: false));
+      color = light?.primary ?? Colors.blueAccent;
     }
+    light = ColorScheme.fromSeed(seedColor: color);
+    dark = ColorScheme.fromSeed(seedColor: color, brightness: Brightness.dark);
+    return (light, dark);
   }
 
   @override
@@ -168,74 +182,35 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
       (context as Element).visitChildren(rebuild);
     }
-
-    final Brightness brightness =
-        View.of(context).platformDispatcher.platformBrightness;
-    if (brightness == Brightness.light) {
-      SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-          systemNavigationBarColor: Colors.transparent,
-          statusBarColor: Colors.transparent,
-          statusBarBrightness: Brightness.dark,
-          statusBarIconBrightness: Brightness.dark,
-          systemNavigationBarIconBrightness: Brightness.dark,
-          systemNavigationBarContrastEnforced: false));
-    } else {
-      SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-          systemNavigationBarColor: Colors.transparent,
-          statusBarColor: Colors.transparent,
-          statusBarBrightness: Brightness.light,
-          statusBarIconBrightness: Brightness.light,
-          systemNavigationBarIconBrightness: Brightness.light,
-          systemNavigationBarContrastEnforced: false));
-    }
     return DynamicColorBuilder(builder: (light, dark) {
-      ColorScheme? lightColor;
-      ColorScheme? darkColor;
-      if (int.parse(appdata.settings[27]) != 0) {
-        lightColor = ColorScheme.fromSeed(
-            seedColor: Color(colors[int.parse(appdata.settings[27]) - 1]),
-            brightness: Brightness.light);
-        darkColor = ColorScheme.fromSeed(
-            seedColor: Color(colors[int.parse(appdata.settings[27]) - 1]),
-            brightness: Brightness.dark);
-      } else {
-        lightColor = light;
-        darkColor = dark;
-      }
-      ColorScheme? colorScheme;
-      if (appdata.settings[32] == "1") {
-        colorScheme =
-            lightColor ?? ColorScheme.fromSeed(seedColor: Colors.pinkAccent);
-      } else if (appdata.settings[32] == "2") {
-        colorScheme = darkColor ??
-            ColorScheme.fromSeed(
-                seedColor: Colors.pinkAccent, brightness: Brightness.dark);
-      }
+      var (lightColor, darkColor) = _generateColorSchemes(light, dark);
       return MaterialApp(
         title: 'Pica Comic',
         debugShowCheckedModeBanner: false,
-        scaffoldMessengerKey: App.messageKey,
         navigatorKey: App.navigatorKey,
         theme: ThemeData(
-          colorScheme: (colorScheme ??
-              lightColor ??
-              ColorScheme.fromSeed(seedColor: Colors.pinkAccent)),
+          colorScheme: lightColor,
           useMaterial3: true,
           fontFamily: App.isWindows ? "font" : "",
         ),
         darkTheme: ThemeData(
-          colorScheme: (colorScheme ??
-              darkColor ??
-              ColorScheme.fromSeed(
-                  seedColor: Colors.pinkAccent, brightness: Brightness.dark)),
+          colorScheme: darkColor,
           useMaterial3: true,
           fontFamily: App.isWindows ? "font" : "",
+          brightness: Brightness.dark,
         ),
-        home: notFirstUse
-            ? (appdata.settings[13] == "1"
-                ? const AuthPage()
-                : const MainPage())
-            : const WelcomePage(),
+        themeMode: appdata.appSettings.darkMode == 2
+            ? ThemeMode.dark
+            : appdata.appSettings.darkMode == 1
+            ? ThemeMode.light
+            : ThemeMode.system,
+        onGenerateRoute: (settings) => AppPageRoute(
+          builder: (context) => notFirstUse
+              ? (appdata.settings[13] == "1"
+              ? const AuthPage()
+              : const MainPage())
+              : const WelcomePage(),
+        ),
         localizationsDelegates: const [
           GlobalMaterialLocalizations.delegate,
           GlobalWidgetsLocalizations.delegate,
@@ -247,26 +222,66 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           Locale('en', 'US')
         ],
         builder: (context, widget) {
-          if (Platform.isWindows) {
-            var channel = const MethodChannel("pica_comic/title_bar");
-            channel.invokeMethod(
-                "color", Theme.of(context).colorScheme.surface.value);
-          }
           ErrorWidget.builder = (details) {
             LogManager.addLog(LogLevel.error, "Unhandled Exception",
                 "${details.exception}\n${details.stack}");
-            return Center(
-              child: Text(details.exception.toString()),
+            return Material(
+              child: Center(
+                child: Text(details.exception.toString()),
+              ),
             );
           };
           if (widget != null) {
-            return Overlay(
-              initialEntries: [OverlayEntry(builder: (context) => widget)],
-            );
+            widget = OverlayWidget(widget);
+            if (App.isDesktop) {
+              widget = Shortcuts(
+                shortcuts: {
+                  LogicalKeySet(LogicalKeyboardKey.escape):
+                  VoidCallbackIntent(
+                        () {
+                      if (App.canPop) {
+                        App.globalBack();
+                      } else {
+                        App.mainNavigatorKey?.currentContext?.pop();
+                      }
+                    },
+                  ),
+                },
+                child: WindowFrame(widget),
+              );
+            }
+            return _SystemUiProvider(widget);
           }
           throw ('widget is null');
         },
       );
     });
+  }
+}
+
+class _SystemUiProvider extends StatelessWidget {
+  const _SystemUiProvider(this.child);
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    var brightness = Theme.of(context).brightness;
+    SystemUiOverlayStyle systemUiStyle;
+    if (brightness == Brightness.light) {
+      systemUiStyle = SystemUiOverlayStyle.dark.copyWith(
+        statusBarColor: Colors.transparent,
+        systemNavigationBarColor: Colors.transparent,
+      );
+    } else {
+      systemUiStyle = SystemUiOverlayStyle.light.copyWith(
+        statusBarColor: Colors.transparent,
+        systemNavigationBarColor: Colors.transparent,
+      );
+    }
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: systemUiStyle,
+      child: child,
+    );
   }
 }

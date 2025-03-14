@@ -1,45 +1,40 @@
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
+import 'package:pica_comic/comic_source/built_in/picacg.dart';
 import 'package:pica_comic/network/cache_network.dart';
 import 'dart:convert' as convert;
 import 'package:pica_comic/network/picacg_network/headers.dart';
-import 'package:pica_comic/network/proxy.dart';
-import 'package:pica_comic/views/pre_search_page.dart';
-import 'package:pica_comic/views/widgets/show_message.dart';
+import 'package:pica_comic/network/http_client.dart';
+import 'package:pica_comic/pages/pre_search_page.dart';
 import '../../base.dart';
 import '../../foundation/app.dart';
 import '../../foundation/log.dart';
-import '../log_dio.dart';
+import '../app_dio.dart';
 import '../res.dart';
 import 'models.dart';
-import 'package:pica_comic/tools/translations.dart';
 
-const defaultAvatarUrl = "DEFAULT AVATAR URL"; //历史遗留, 不改了
+export "models.dart";
+
+const defaultAvatarUrl = "DEFAULT AVATAR URL";
 
 ///哔咔网络请求类
 class PicacgNetwork {
-  factory PicacgNetwork([String token = ""]) =>
-      cache ?? (cache = PicacgNetwork._create(token = token));
+  factory PicacgNetwork() => cache ?? (cache = PicacgNetwork._create());
 
   static PicacgNetwork? cache;
 
-  PicacgNetwork._create([this.token = ""]);
-
-  String apiUrl = appdata.settings[3] == "1"
-      ? "$serverDomain/picaapi"
-      : "https://picaapi.picacomic.com";
-  InitData? initData;
-  String token;
-
-  var hotTags = <String>[];
-
-  Future<void> updateApi() async {
-    if (appdata.settings[3] == "1") {
-      apiUrl = "$serverDomain/picaapi";
-    } else {
-      apiUrl = "https://picaapi.picacomic.com";
+  PicacgNetwork._create() {
+    if (picacg.data['user'] != null) {
+      try {
+        user = Profile.fromJson(picacg.data['user']);
+      } finally {}
     }
   }
+
+  final String apiUrl = "https://picaapi.picacomic.com";
+
+  String get token => picacg.data['token'] ?? '';
+
+  Profile? user;
 
   Future<Res<Map<String, dynamic>>> get(String url,
       {CacheExpiredTime expiredTime = CacheExpiredTime.short,
@@ -89,9 +84,7 @@ class PicacgNetwork {
 
   Future<Res<Map<String, dynamic>>> post(
       String url, Map<String, String>? data) async {
-    var api = appdata.settings[3] == "1"
-        ? "$serverDomain/picaapi"
-        : "https://picaapi.picacomic.com";
+    var api = "https://picaapi.picacomic.com";
     if (token == "" &&
         url != '$api/auth/sign-in' &&
         url != "https://picaapi.picacomic.com/auth/register") {
@@ -148,11 +141,9 @@ class PicacgNetwork {
     }
   }
 
-  ///登录
-  Future<Res<bool>> login(String email, String password) async {
-    var api = appdata.settings[3] == "1"
-        ? "$serverDomain/picaapi"
-        : "https://picaapi.picacomic.com";
+  ///登录, 返回token
+  Future<Res<String>> login(String email, String password) async {
+    var api = "https://picaapi.picacomic.com";
     var response = await post('$api/auth/sign-in', {
       "email": email,
       "password": password,
@@ -163,24 +154,22 @@ class PicacgNetwork {
     var res = response.data;
     if (res["message"] == "success") {
       try {
-        token = res["data"]["token"];
+        return Res(res["data"]["token"]);
       } catch (e) {
         return const Res(null, errorMessage: "Failed to get token");
       }
-      if (kDebugMode) {
-        print("Logging successfully");
-      }
-      return const Res(true);
     } else {
       return Res(null, errorMessage: res["message"]);
     }
   }
 
   Future<Res<bool>> loginFromAppdata() async {
-    if (appdata.picacgAccount == "") {
-      return const Res(null, errorMessage: "No account data");
+    var res = await picacg.reLogin();
+    if (res) {
+      return const Res(true);
+    } else {
+      return const Res.error("Failed to re-login");
     }
-    return login(appdata.picacgAccount, appdata.picacgPassword);
   }
 
   ///获取用户信息
@@ -220,12 +209,13 @@ class PicacgNetwork {
     if (res.error) {
       return Res.fromErrorRes(res);
     }
-    appdata.user = res.data;
+    user = res.data;
+    picacg.data['user'] = user!.toJson();
+    picacg.saveData();
     return const Res(true);
   }
 
-  ///获取热搜词
-  Future<Res<bool>> getKeyWords() async {
+  Future<Res<List<String>>> getHotTags() async {
     var response =
         await get("$apiUrl/keywords", expiredTime: CacheExpiredTime.no);
     if (response.error) {
@@ -236,8 +226,7 @@ class PicacgNetwork {
     for (int i = 0; i < (res["data"]["keywords"] ?? []).length; i++) {
       k.add(res["data"]["keywords"][i]);
     }
-    hotTags = k;
-    return const Res(true);
+    return Res(k);
   }
 
   ///获取分类
@@ -423,7 +412,8 @@ class PicacgNetwork {
     try {
       while (flag) {
         i++;
-        var res = await get("$apiUrl/comics/$id/eps?page=$i");
+        var res = await get("$apiUrl/comics/$id/eps?page=$i",
+            expiredTime: CacheExpiredTime.no);
         if (res.error) {
           return Res(null, errorMessage: res.errorMessage);
         } else if (res.data["data"]["eps"]["pages"] == i) {
@@ -557,7 +547,6 @@ class PicacgNetwork {
                 res["data"]["comics"]["docs"][i]["thumb"]["path"],
             res["data"]["comics"]["docs"][i]["_id"],
             tags,
-            ignoreExamination: true,
             pages: res["data"]["comics"]["docs"][i]["pagesCount"]);
         comics.add(si);
       }
@@ -592,9 +581,7 @@ class PicacgNetwork {
               tags,
               pages: res["data"]["comics"][i]["pagesCount"]);
           comics.add(si);
-        } catch (e) {
-          //出现错误跳过
-        }
+        }  finally {}
       }
     } else {
       return Res.fromErrorRes(response);
@@ -614,14 +601,8 @@ class PicacgNetwork {
   Future<bool> favouriteOrUnfavouriteComic(String id) async {
     var res = await post('$apiUrl/comics/$id/favourite', {});
     if (res.error) {
-      showMessage(App.globalContext, "网络错误".tl);
       return false;
     }
-    showMessage(
-        App.globalContext,
-        (res.data["data"]["action"] == "favourite")
-            ? "添加收藏成功".tl
-            : "取消收藏成功".tl);
     return true;
   }
 
@@ -655,11 +636,9 @@ class PicacgNetwork {
           pages: res["data"]["comics"][i]["pagesCount"],
         );
         comics.add(si);
-      } catch (e) {
-        //出现错误跳过
-      }
+      }  finally {}
     }
-    return Res(comics);
+    return Res(comics, subData: 1);
   }
 
   Future<Res<String>> register(
@@ -827,19 +806,17 @@ class PicacgNetwork {
           tags.addAll(
               List<String>.from(res["data"]["comics"][i]["categories"] ?? []));
           var si = ComicItemBrief(
-              res["data"]["comics"][i]["title"] ?? "Unknown",
-              res["data"]["comics"][i]["author"] ?? "Unknown",
-              int.parse(res["data"]["comics"][i]["likesCount"].toString()),
-              res["data"]["comics"][i]["thumb"]["fileServer"] +
-                  "/static/" +
-                  res["data"]["comics"][i]["thumb"]["path"],
-              res["data"]["comics"][i]["_id"],
-              tags,
-              ignoreExamination: true);
+            res["data"]["comics"][i]["title"] ?? "Unknown",
+            res["data"]["comics"][i]["author"] ?? "Unknown",
+            int.parse(res["data"]["comics"][i]["likesCount"].toString()),
+            res["data"]["comics"][i]["thumb"]["fileServer"] +
+                "/static/" +
+                res["data"]["comics"][i]["thumb"]["path"],
+            res["data"]["comics"][i]["_id"],
+            tags,
+          );
           comics.add(si);
-        } catch (e) {
-          //出现错误跳过
-        }
+        }  finally {}
       }
     } else {
       return Res.fromErrorRes(response);
@@ -868,7 +845,6 @@ class PicacgNetwork {
                 res["data"]["collections"][0]["comics"][i]["thumb"]["path"],
             res["data"]["collections"][0]["comics"][i]["_id"],
             [],
-            ignoreExamination: true,
             pages: res["data"]["collections"][0]["comics"][i]["pagesCount"],
           );
           comics[0].add(si);
@@ -876,9 +852,7 @@ class PicacgNetwork {
           //出现错误跳过
         }
       }
-    } catch (e) {
-      //跳过
-    }
+    }  finally {}
     try {
       for (int i = 0; i < res["data"]["collections"][1]["comics"].length; i++) {
         try {
@@ -891,17 +865,12 @@ class PicacgNetwork {
                 res["data"]["collections"][1]["comics"][i]["thumb"]["path"],
             res["data"]["collections"][1]["comics"][i]["_id"],
             [],
-            ignoreExamination: true,
             pages: res["data"]["collections"][1]["comics"][i]["pagesCount"],
           );
           comics[1].add(si);
-        } catch (e) {
-          //出现错误跳过}
-        }
+        } finally {}
       }
-    } catch (e) {
-      //跳过
-    }
+    }  finally {}
     return Res(comics);
   }
 
@@ -1065,9 +1034,7 @@ class PicacgNetwork {
 }
 
 String getImageUrl(String url) {
-  if (url.contains(serverDomain)) return url;
-  if (!url.contains("pica")) return url;
-  return appdata.settings[3] == "1" ? "$serverDomain/storage/$url" : url;
+  return url;
 }
 
-var network = PicacgNetwork();
+PicacgNetwork get network => PicacgNetwork();

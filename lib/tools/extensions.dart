@@ -18,6 +18,12 @@ extension ListExtension<T> on List<T>{
     }
     return null;
   }
+
+  void addIfNotNull(T? value){
+    if(value != null){
+      add(value);
+    }
+  }
 }
 
 extension StringExtension on String{
@@ -68,13 +74,10 @@ extension StringExtension on String{
   }
 
   bool _isURL(){
-    if(!(Uri.tryParse(this)?.hasScheme ?? false)){
-      return false;
-    }
-    if(indexOf("https://") > 0){
-      return false;
-    }
-    return true;
+    final regex = RegExp(
+        r'^((http|https|ftp)://)?[\w-]+(\.[\w-]+)+([\w.,@?^=%&:/~+#-|]*[\w@?^=%&/~+#-])?$',
+        caseSensitive: false);
+    return regex.hasMatch(this);
   }
 
   bool get isURL => _isURL();
@@ -92,4 +95,10 @@ extension MapExtension<S, T> on Map<S, List<T>>{
   }
 
   int get totalLength => _getTotalLength();
+}
+
+class ListOrNull{
+  static List<T>? from<T>(Iterable<dynamic>? i){
+    return i == null ? null : List.from(i);
+  }
 }

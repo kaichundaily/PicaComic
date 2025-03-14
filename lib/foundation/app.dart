@@ -7,6 +7,7 @@ import 'package:pica_comic/foundation/log.dart';
 import '../base.dart';
 
 export 'state_controller.dart';
+export 'widget_utils.dart';
 
 class App {
   // platform
@@ -14,15 +15,16 @@ class App {
   static bool get isIOS => Platform.isIOS;
   static bool get isWindows => Platform.isWindows;
   static bool get isLinux => Platform.isLinux;
+  static bool get isMacOS => Platform.isMacOS;
   static bool get isDesktop =>
       Platform.isWindows || Platform.isLinux || Platform.isMacOS;
   static bool get isMobile => Platform.isAndroid || Platform.isIOS;
 
   static BuildContext? get globalContext => navigatorKey.currentContext;
 
-  static final messageKey = GlobalKey<ScaffoldMessengerState>();
-
   static final navigatorKey = GlobalKey<NavigatorState>();
+
+  static GlobalKey<NavigatorState>? mainNavigatorKey;
 
   /// get ui mode
   static UiModes uiMode([BuildContext? context]) {
@@ -47,17 +49,10 @@ class App {
   /// **Warning: The end of String is not '/'**
   static late final String dataPath;
 
-  static init() async {
+  static Future<void> init() async {
     cachePath = (await getApplicationCacheDirectory()).path;
     dataPath = (await getApplicationSupportDirectory()).path;
   }
-
-  //ComicTile的最大宽度
-  static double get comicTileMaxWidth =>
-      [680.0, 200.0, 120.0, 720.0][int.parse(appdata.settings[44])];
-  //ComicTile的宽高比
-  static double get comicTileAspectRatio =>
-      [3.0, 0.62, 0.62, 2.5][int.parse(appdata.settings[44])];
 
   static back(BuildContext context) {
     if (Navigator.canPop(context)) {
@@ -74,29 +69,29 @@ class App {
   static off(BuildContext context, Widget Function() page) {
     LogManager.addLog(LogLevel.info, "App Status",
         "Going to Page /${page.runtimeType.toString().replaceFirst("() => ", "")}");
-    Navigator.of(context).pushReplacement(AppPageRoute(page));
+    Navigator.of(context).pushReplacement(AppPageRoute(builder: (context) => page()));
   }
 
   static globalOff(Widget Function() page) {
     LogManager.addLog(LogLevel.info, "App Status",
         "Going to Page /${page.runtimeType.toString().replaceFirst("() => ", "")}");
-    Navigator.of(globalContext!).pushReplacement(AppPageRoute(page));
+    Navigator.of(globalContext!).pushReplacement(AppPageRoute(builder: (context) => page()));
   }
 
   static offAll(Widget Function() page) {
     Navigator.of(globalContext!)
-        .pushAndRemoveUntil(AppPageRoute(page), (route) => false);
+        .pushAndRemoveUntil(AppPageRoute(builder: (context) => page()), (route) => false);
   }
 
   static Future<T?> to<T extends Object?>(BuildContext context, Widget Function() page,
       [bool enableIOSGesture = true]) {
     LogManager.addLog(LogLevel.info, "App Status",
         "Going to Page /${page.runtimeType.toString().replaceFirst("() => ", "")}");
-    return Navigator.of(context).push<T>(AppPageRoute(page, enableIOSGesture));
+    return Navigator.of(context).push<T>(AppPageRoute(builder: (context) => page()));
   }
 
   static Future<T?> globalTo<T extends Object?>(Widget Function() page, {bool preventDuplicates = false}) {
-    return Navigator.of(globalContext!).push<T>(AppPageRoute(page));
+    return Navigator.of(globalContext!).push<T>(AppPageRoute(builder: (context) => page()));
   }
 
   static bool get enablePopGesture => isIOS;
@@ -111,19 +106,19 @@ class App {
 
   static bool temporaryDisablePopGesture = false;
 
-  static Locale get locale => () {
-        return switch (appdata.settings[50]) {
-          "cn" => const Locale("zh", "CN"),
-          "tw" => const Locale("zh", "TW"),
-          "en" => const Locale("en", "US"),
-          _ => PlatformDispatcher.instance.locale,
-        };
-      }.call();
+  static Locale get locale {
+    Locale deviceLocale = PlatformDispatcher.instance.locale;
+    if (deviceLocale.languageCode == "zh" && deviceLocale.scriptCode == "Hant") {
+      deviceLocale = const Locale("zh", "TW");
+    }
+    return switch (appdata.settings[50]) {
+      "cn" => const Locale("zh", "CN"),
+      "tw" => const Locale("zh", "TW"),
+      "en" => const Locale("en", "US"),
+      _ => deviceLocale,
+    };
+  }
 
-  /// This function will be called when app life circle state changed.
-  /// 
-  /// Page can change this, and must set this to null when user exit the page.
-  static void Function()? onAppLifeCircleChanged;
 
   /// size of screen
   static Size screenSize(BuildContext context) => MediaQuery.of(context).size;

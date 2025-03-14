@@ -1,6 +1,9 @@
 import 'package:pica_comic/base.dart';
+import 'package:pica_comic/foundation/history.dart';
+import 'package:pica_comic/network/base_comic.dart';
 
-class EhGalleryBrief{
+class EhGalleryBrief extends BaseComic{
+  @override
   String title;
   String type;
   String time;
@@ -8,24 +11,26 @@ class EhGalleryBrief{
   double stars; //0-5
   String coverPath;
   String link;
+  @override
   List<String> tags;
   int? pages;
 
-  EhGalleryBrief(this.title,this.type,this.time,this.uploader,this.coverPath,this.stars,this.link,this.tags, {bool ignoreExamination=false, this.pages}){
-    if(ignoreExamination) return;
-    bool block = false;
-    for(var key in appdata.blockingKeyword){
-      block = block || title.contains(key) || uploader==key || type==key;
-    }
-    for(var key in appdata.blockingKeyword){
-      for(var tag in tags){
-        block = block || tag.split(":").contains(key);
-      }
-    }
-    if(block){
-      throw Error();
-    }
-  }
+  EhGalleryBrief(this.title,this.type,this.time,this.uploader,this.coverPath,this.stars,this.link,this.tags, {this.pages});
+
+  @override
+  String get cover => coverPath;
+
+  @override
+  String get description => time;
+
+  @override
+  String get id => link;
+
+  @override
+  String get subTitle => uploader;
+
+  @override
+  bool get enableTagsTranslation => true;
 }
 
 class Galleries{
@@ -36,15 +41,21 @@ class Galleries{
 }
 
 class Comment{
+  String id;
   String name;
   String content;
   String time;
+  int score;
+  // true: up, false: down, null: not voted
+  bool? voteUP;
 
-  Comment(this.name, this.content, this.time);
+  Comment(this.id, this.name, this.content, this.time, this.score, this.voteUP);
 }
 
-class Gallery{
+class Gallery with HistoryMixin{
+  @override
   String title;
+  @override
   String? subTitle;
   String type;
   String time;
@@ -58,7 +69,9 @@ class Gallery{
   Map<String,String>? auth;
   bool favorite;
   String link;
+  @override
   String maxPage;
+  List<String> thumbnails;
 
   List<String> _generateTags(){
     var res = <String>[];
@@ -78,7 +91,7 @@ class Gallery{
       coverPath,
       stars,
       link,
-      _generateTags()
+      _generateTags(),
   );
 
   Map<String, dynamic> toJson() {
@@ -95,6 +108,7 @@ class Gallery{
       "favorite": favorite,
       "link": link,
       "maxPage": maxPage,
+      "auth": auth
     };
   }
 
@@ -111,6 +125,8 @@ class Gallery{
     favorite = json["favorite"],
     link = json["link"],
     maxPage = json["maxPage"],
+    thumbnails = [],
+    auth = json["auth"] == null ? null : Map<String,String>.from(json["auth"]),
     comments = []{
     for(var key in (json["tags"] as Map<String, dynamic>).keys){
       tags["key"] = List<String>.from(json["tags"][key]);
@@ -131,8 +147,17 @@ class Gallery{
       this.favorite,
       this.link,
       this.maxPage,
-      List<String> str, // unused field
+      this.thumbnails, // unused field
       this.subTitle);
+
+  @override
+  String get cover => coverPath;
+
+  @override
+  HistoryType get historyType => HistoryType.ehentai;
+
+  @override
+  String get target => link;
 }
 
 enum EhLeaderboardType{
@@ -144,6 +169,21 @@ enum EhLeaderboardType{
   final int value;
 
   const EhLeaderboardType(this.value);
+
+  static EhLeaderboardType fromValue(int value){
+    switch(value){
+      case 15:
+        return EhLeaderboardType.yesterday;
+      case 13:
+        return EhLeaderboardType.month;
+      case 12:
+        return EhLeaderboardType.year;
+      case 11:
+        return EhLeaderboardType.all;
+      default:
+        throw Exception("Invalid value");
+    }
+  }
 }
 
 class EhLeaderboard{
@@ -153,4 +193,26 @@ class EhLeaderboard{
   static const int max = 199;
 
   EhLeaderboard(this.type,this.galleries,this.loaded);
+}
+
+class EhImageLimit{
+  final int current;
+  final int max;
+  final int resetCost;
+  final int kGP;
+  final int credits;
+
+  const EhImageLimit(this.current, this.max, this.resetCost, this.kGP, this.credits);
+}
+
+class ArchiveDownloadInfo{
+  final String originSize;
+  final String resampleSize;
+  final String originCost;
+  final String resampleCost;
+  final String? cancelUnlockUrl;
+
+  const ArchiveDownloadInfo(this.originSize,
+      this.resampleSize, this.originCost, this.resampleCost,
+      this.cancelUnlockUrl);
 }

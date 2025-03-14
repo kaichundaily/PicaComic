@@ -1,6 +1,6 @@
 import 'package:flutter/cupertino.dart';
-
-import '../../base.dart';
+import 'package:pica_comic/foundation/history.dart';
+import 'package:pica_comic/network/base_comic.dart';
 
 @immutable
 class HtHomePageData {
@@ -12,28 +12,37 @@ class HtHomePageData {
 }
 
 @immutable
-class HtComicBrief {
+class HtComicBrief extends BaseComic{
   final String name;
   final String time;
   final String image;
   final int pages;
+  @override
   final String id;
   final String? favoriteId;
 
   /// 漫画简略信息
-  HtComicBrief(this.name, this.time, this.image, this.id, this.pages,
-      {bool ignoreExamination = false, this.favoriteId}) {
-    if (ignoreExamination) return;
-    for (var key in appdata.blockingKeyword) {
-      if (name.contains(key)) {
-        throw Exception();
-      }
-    }
-  }
+  const HtComicBrief(this.name, this.time, this.image, this.id, this.pages,
+      {this.favoriteId});
+
+  @override
+  String get cover => image;
+
+  @override
+  String get description => time;
+
+  @override
+  String get subTitle => id;
+
+  @override
+  List<String> get tags => const [];
+
+  @override
+  String get title => name;
 }
 
 @immutable
-class HtComicInfo {
+class HtComicInfo with HistoryMixin {
   final String id;
   final String coverPath;
   final String name;
@@ -76,4 +85,19 @@ class HtComicInfo {
       avatar = json["avatar"],
       uploadNum = json["uploadNum"],
       thumbnails = [];
+
+  @override
+  String get cover => coverPath;
+
+  @override
+  HistoryType get historyType => HistoryType.htmanga;
+
+  @override
+  String get subTitle => uploader;
+
+  @override
+  String get target => id;
+
+  @override
+  String get title => name;
 }

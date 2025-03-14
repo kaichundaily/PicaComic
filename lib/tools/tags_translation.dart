@@ -19,7 +19,10 @@ extension TagsTranslation on String{
   static final Map<String, Map<String, String>> _data = {};
 
   static Future<void> readData() async{
-    var data = await rootBundle.load("assets/tags.json");
+    var fileName = App.locale.countryCode == 'TW'
+        ? "assets/tags_tw.json"
+        : "assets/tags.json";
+    var data = await rootBundle.load(fileName);
     List<int> bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
     const JsonDecoder().convert(const Utf8Decoder().convert(bytes)).forEach((key, value){
       _data[key] = {};
@@ -29,22 +32,27 @@ extension TagsTranslation on String{
     });
   }
 
+  static bool _haveNamespace(String key) {
+    return _data.containsKey(key);
+  }
 
-  /// 静态方法, 需要传入参数, 因为需要递归
-  ///
-  /// 对tag进行处理后进行翻译: 代表'或'的分割符'|', 修饰词'low','focus'.
+  /// 对tag进行处理后进行翻译: 代表'或'的分割符'|', namespace.
   static String _translateTags(String tag){
-    if(tag.contains('|')){
+    if (tag.contains('|')) {
       var splits = tag.split(' | ');
       return enTagsTranslations[splits[0]]??enTagsTranslations[splits[1]]??tag;
-    }else if(tag.contains("low ")){
-      return "弱存在${_translateTags(tag.replaceFirst("low ", ""))}";
-    }else if(tag.contains("focus ")){
-      return "专注${_translateTags(tag.replaceFirst("focus ", ""))}";
-    }else{
+    } else if(tag.contains(':')) {
+      var splits = tag.split(':');
+      if(_haveNamespace(splits[0])) {
+        return translationTagWithNamespace(splits[1], splits[0]);
+      } else {
+        return tag;
+      }
+    } else {
       return enTagsTranslations[tag]??tag;
     }
   }
+
   /// translate tag's text to chinese
   String get translateTagsToCN => _translateTags(this);
 
@@ -81,7 +89,13 @@ extension TagsTranslation on String{
 
   String get translateTagsCategoryToCN => tagsCategoryTranslations[this]??this;
 
-  static const tagsCategoryTranslations = {
+  get tagsCategoryTranslations => switch(App.locale.countryCode){
+    "CN" => tagsCategoryTranslationsCN,
+    "TW" => tagsCategoryTranslationsTW,
+    _ => tagsCategoryTranslationsCN
+  };
+
+  static const tagsCategoryTranslationsCN = {
     "language": "语言",
     "artist": "画师",
     "male": "男性",
@@ -101,6 +115,28 @@ extension TagsTranslation on String{
     "Parodies": "原作",
     "Categories": "分类",
     "Time": "时间"
+  };
+
+  static const tagsCategoryTranslationsTW = {
+    "language": "語言",
+    "artist": "畫師",
+    "male": "男性",
+    "female": "女性",
+    "mixed": "混合",
+    "other": "其他",
+    "parody": "原作",
+    "character": "角色",
+    "group": "團隊",
+    "cosplayer": "Coser",
+    "reclass": "重新分類",
+    "Languages": "語言",
+    "Artists": "畫師",
+    "Characters": "角色",
+    "Groups": "團隊",
+    "Tags": "標籤",
+    "Parodies": "原作",
+    "Categories": "分類",
+    "Time": "時間"
   };
 
   static Map<String, String> get maleTags => _data["male"] ?? const {};

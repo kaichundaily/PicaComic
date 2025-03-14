@@ -1,358 +1,740 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cookie_jar/cookie_jar.dart';
+import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
-import 'package:html/dom.dart' as dom;
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:html/parser.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:pica_comic/base.dart';
-import 'package:pica_comic/foundation/log.dart';
-import 'package:pica_comic/foundation/state_controller.dart';
+import 'package:pica_comic/comic_source/built_in/jm.dart';
+import 'package:pica_comic/foundation/app.dart';
 import 'package:pica_comic/network/cache_network.dart';
-import 'package:pica_comic/network/log_dio.dart';
-import 'package:pica_comic/network/res.dart';
-import 'package:pica_comic/tools/extensions.dart';
-import 'package:pica_comic/views/pre_search_page.dart';
+import 'package:pica_comic/pages/pre_search_page.dart';
+import 'package:pointycastle/api.dart';
+import 'package:pointycastle/block/aes.dart';
+import 'package:pointycastle/block/modes/ecb.dart';
+
+import '../../foundation/cache_manager.dart';
+import '../../foundation/log.dart';
+import '../app_dio.dart';
+import '../http_client.dart';
+import '../res.dart';
+import 'headers.dart';
 import 'jm_image.dart';
 import 'jm_models.dart';
 
+extension _CachedNetwork on CachedNetwork {
+  Future<CachedNetworkRes<String>> getJm(
+      String url, BaseOptions options, int time,
+      {CacheExpiredTime expiredTime = CacheExpiredTime.short,
+      CookieJar? cookieJar}) async {
+    await setNetworkProxy();
+    final key = url;
+    var cache = await CacheManager().findCache(key);
+    if (cache != null) {
+      var file = File(cache);
+      return CachedNetworkRes(await file.readAsString(), 200, url);
+    }
+    options.responseType = ResponseType.bytes;
+    var dio = logDio(options);
+    if (cookieJar != null) {
+      dio.interceptors.add(CookieManager(cookieJar));
+    }
+    var res = await dio.get<Uint8List>(url);
+    if (res.data == null) {
+      throw Exception("Empty data");
+    }
+    var body = utf8.decoder.convert(res.data!);
+    if (res.statusCode != 200) {
+      return CachedNetworkRes(body, res.statusCode, res.realUri.toString());
+    }
+    var json = const JsonDecoder().convert(body);
+    var data = json["data"];
+    if (data is List && data.isEmpty) {
+      throw Exception("Empty data");
+    } else if (data is List) {
+      throw Exception("Data parsing error");
+    }
+    var decodedData = JmNetwork.convertData(data, time);
+    if (expiredTime != CacheExpiredTime.no) {
+      await CacheManager().writeCache(key, res.data!, expiredTime.time);
+    }
+    return CachedNetworkRes(
+        decodedData, res.statusCode, res.realUri.toString());
+  }
+}
+
 class JmNetwork {
-  /// Network requests for JmComic.
-  ///
-  /// Use web api.
-  factory JmNetwork() =>
-      _cache == null ? (_cache = JmNetwork.create()) : _cache!;
+  static const baseData = "";
+
+  // 禁漫的cookie无需持久化储存, 因为有效期非常短
+  final cookieJar = CookieJar(ignoreExpires: true);
+
+  var hotTags = <String>[];
+
+  factory JmNetwork() => cache == null ? (cache = JmNetwork.create()) : cache!;
 
   JmNetwork.create();
 
-  static JmNetwork? _cache;
+  static JmNetwork? cache;
 
-  static String get baseUrl => appdata.settings[56];
+  static const urls = <String>[
+    "https://www.jmeadpoolcdn.one",
+    "https://www.jmeadpoolcdn.life",
+    "https://www.jmapiproxyxxx.one",
+    "https://www.jmfreedomproxy.xyz"
+  ];
 
-  static const cloudflareChallenge = "JM: need cloudflare challenge";
+  String get baseUrl => urls[int.parse(appdata.settings[17])];
 
-  set ua(String value) {
-    appdata.nhentaiData[0] = value;
-    appdata.updateNhentai();
+  static const kJmSecret = '185Hcomic3PAPP7R';
+
+  bool _performingLogin = false;
+
+  ///解密数据
+  static String convertData(String input, int time) {
+    //key为时间+18comicAPPContent的md5结果
+    var key = md5.convert(const Utf8Encoder().convert("$time$kJmSecret"));
+    BlockCipher cipher = ECBBlockCipher(AESEngine())
+      ..init(false, KeyParameter(const Utf8Encoder().convert(key.toString())));
+    //先将数据进行base64解码
+    final data = base64Decode(input);
+    //再进行AES-ECB解密
+    var offset = 0;
+    var paddedPlainText = Uint8List(data.length);
+    while (offset < data.length) {
+      offset += cipher.processBlock(data, offset, paddedPlainText, offset);
+    }
+    //将得到的数据进行Utf8解码
+    var res = const Utf8Decoder().convert(paddedPlainText);
+    //得到的数据在末尾有一些乱码
+    int i = res.length - 1;
+    for (; i >= 0; i--) {
+      if (res[i] == '}' || res[i] == ']') {
+        break;
+      }
+    }
+    return res.substring(0, i + 1);
   }
 
-  String get ua => appdata.nhentaiData[0];
-
-  PersistCookieJar? cookieJar;
-
   Future<void> init() async {
-    var path = (await getApplicationSupportDirectory()).path;
-    path = "$path$pathSep${"jm_cookies"}";
-    cookieJar = PersistCookieJar(storage: FileStorage(path));
     loginFromAppdata();
   }
 
-  Future<Res<String>> get(String url) async {
-    if (cookieJar == null) {
-      await init();
+  ///get请求, 返回Json数据中的data
+  Future<Res<dynamic>> get(String url,
+      {Map<String, String>? header,
+      CacheExpiredTime expiredTime = CacheExpiredTime.long,
+      bool isRetry = false}) async {
+    while (_performingLogin) {
+      await Future.delayed(const Duration(milliseconds: 100));
     }
+
+    int time = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     var dio = CachedNetwork();
-
+    var options = getHeader(time);
+    options.validateStatus = (i) => i == 200 || i == 401;
     try {
-      var res = await dio.get(
-          url,
-          BaseOptions(headers: {
-            "User-Agent": ua,
-            "Accept":
-                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language":
-                "zh-CN,zh-TW;q=0.9,zh;q=0.8,en-US;q=0.7,en;q=0.6",
-            "Referer": baseUrl
-          }, validateStatus: (i) => i==200 || i==403 || i==301, responseType: ResponseType.plain,
-          followRedirects: true),
-          expiredTime: CacheExpiredTime.no,
-          http2: true,
-          cookieJar: cookieJar);
-
-      if (res.statusCode == 403) {
-        if (res.data.contains("Just a moment...")) {
-          throw cloudflareChallenge;
-        }
-      }
-
-      if(res.statusCode == 301){
-        return get(res.headers["location"]!.first);
-      }
-
-      if (res.statusCode != 200) {
-        return Res(null,
-            errorMessage: "Invalid Status Code: ${res.statusCode}");
-      }
-      return Res(res.data);
-    } catch (e, s) {
-      LogManager.addLog(LogLevel.error, "Network", "$e\n$s");
-      return Res(null, errorMessage: e.toString());
-    }
-  }
-
-  Future<Res<String>> post(String url, dynamic data, [String? contentType]) async{
-    if (cookieJar == null) {
-      await init();
-    }
-    var dio = logDio(BaseOptions(), true);
-
-    dio.interceptors.add(CookieManager(cookieJar!));
-
-    try {
-      var res = await dio.post(
-          url,
-          data: data,
-          options: Options(
-            headers: {
-              "User-Agent": ua,
-              "Accept":
-              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-              "Accept-Language":
-              "zh-CN,zh-TW;q=0.9,zh;q=0.8,en-US;q=0.7,en;q=0.6",
-              "Referer": baseUrl,
-              if(contentType != null)
-                "Content-Type": contentType,
-            },
-            followRedirects: false,
-            validateStatus: (i) => i == 200 || i == 302 || i == 301
-          ));
-      if(res.statusCode == 302 || res.statusCode == 301){
-        return const Res("Redirect");
-      }
-      if (res.statusCode != 200) {
-        return Res(null,
-            errorMessage: "Invalid Status Code: ${res.statusCode}");
-      }
-      return Res(res.data);
-    } catch (e, s) {
-      LogManager.addLog(LogLevel.error, "Network", "$e\n$s");
-      return Res(null, errorMessage: e.toString());
-    }
-  }
-
-  Future<Res<bool>> loginFromAppdata() async{
-    var account = appdata.jmName;
-    var pwd = appdata.jmPwd;
-    if (account == "") {
-      return const Res(true);
-    }
-    return login(account, pwd);
-  }
-
-  JmComicBrief? _parseComic(dom.Element element) {
-    try {
-      var name = element.querySelector("span.video-title")!.text;
-      var author = element.querySelector("div.title-truncate-index > a")?.text;
-      author ??= element.querySelector("div.title-truncate > a")!.text;
-      var tags = element.querySelectorAll("a.tag").map((e) => e.text).toList();
-      tags.addAll(element.querySelectorAll("div.title-truncate > a")
-          .map((e) => e.text).toList());
-      var categories = element
-          .querySelector("div.category-icon")
-          ?.children
-          .map((e) => e.text.removeAllBlank)
-          .toList();
-      categories ??= [
-        element.querySelector("div.label-sub")!.text.removeAllBlank
-      ];
-      var id = (element.querySelector("div.thumb-overlay-albums > a") ??
-          element.querySelector("div.thumb-overlay > a"))!
-          .attributes["href"]!
-          .split("/")
-          .firstWhere((element) => element.isNum);
-      return JmComicBrief(id, author, name, "",
-          categories.map((e) => ComicCategoryInfo("", e)).toList(), tags.toSet().toList());
-    } catch (e) {
-      return null;
-    }
-  }
-
-  (List<JmComicBrief>, int) _parsePageComics(dom.Document element) {
-    var comics = element
-        .querySelectorAll("div.p-b-15.p-l-5.p-r-5")
-        .map((e) => _parseComic(e))
-        .toList();
-
-    while (comics.remove(null)) {}
-
-    var pageSelectors =
-        element.querySelectorAll("ul.pagination > li > select > option");
-    int pages;
-    try {
-      pages = int.parse(pageSelectors.last.text);
-    }
-    catch(e){
-      pages = 1;
-    }
-
-    return (List.from(comics), pages);
-  }
-
-  Future<Res<HomePageData>> getHomePage() async {
-    try {
-      var res = await get(baseUrl);
-      if (res.error) {
-        return Res.fromErrorRes(res);
-      }
-      var document = parse(res.data);
-
-      var rows = document.querySelectorAll(
-          "div.container > div.col-lg-12.col-md-12 > div.row");
-
-      var data = HomePageData([]);
-
-      for (int i = 0; i + 1 < rows.length; i += 2) {
-        try {
-          final title = rows[i].querySelector("div.pull-left > h4")!.text;
-          final id =
-          rows[i].querySelector("div.pull-right > a")!.attributes["href"];
-          var comics = <JmComicBrief>[];
-          for (var element
-          in rows[i + 1].querySelectorAll("div.well.p-b-15.p-l-5.p-r-5")) {
-            var comic = _parseComic(element);
-            if (comic != null) {
-              comics.add(comic);
-            }
+      var res = await dio.getJm(url, options, time,
+          cookieJar: cookieJar, expiredTime: CacheExpiredTime.no);
+      if (res.statusCode == 401) {
+        var message =
+            const JsonDecoder().convert(res.data)["errorMsg"] ?? "Error";
+        if (message == "請先登入會員" && jm.isLogin && !isRetry) {
+          var res = await jm.reLogin();
+          if (res) {
+            return get(
+              url,
+              header: header,
+              expiredTime: expiredTime,
+              isRetry: true,
+            );
           }
-          data.items.add(HomePageItem(title, id!, comics, true));
         }
-        catch(e){
-          break;
+        return Res(null, errorMessage: message);
+      }
+
+      final data = const JsonDecoder().convert(res.data);
+
+      return Res<dynamic>(data);
+    } on DioException catch (e) {
+      if (kDebugMode) {
+        print(e);
+      }
+      if (e.type != DioExceptionType.unknown) {
+        return Res<String>(null, errorMessage: e.message ?? "Network Error");
+      } else {
+        return Res<String>(null, errorMessage: e.toString().split("\n")[1]);
+      }
+    } catch (e, s) {
+      if (kDebugMode) {
+        print(e);
+      }
+      LogManager.addLog(LogLevel.error, "Network", "$e\n$s");
+      return Res<String>(null, errorMessage: e.toString());
+    }
+  }
+
+  /// post请求
+  Future<Res<dynamic>> post(String url, String data) async {
+    try {
+      await setNetworkProxy();
+      int time = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      var dio = logDio(getHeader(time, post: true));
+      dio.interceptors.add(CookieManager(cookieJar));
+      var res = await dio.post(url,
+          options: Options(validateStatus: (i) => i == 200 || i == 401),
+          data: data);
+      if (res.statusCode == 401) {
+        return Res(null,
+            errorMessage: const JsonDecoder().convert(
+                    const Utf8Decoder().convert(res.data))["errorMsg"] ??
+                "Unknown Error".toString());
+      }
+      var resData = convertData(
+          (const JsonDecoder()
+              .convert(const Utf8Decoder().convert(res.data)))["data"],
+          time);
+      return Res<dynamic>(const JsonDecoder().convert(resData));
+    } on DioException catch (e) {
+      if (kDebugMode) {
+        print(e);
+      }
+      if (e.type != DioExceptionType.unknown) {
+        return const Res.error("Network Error");
+      } else {
+        return Res.error(e.toString());
+      }
+    } catch (e, s) {
+      if (kDebugMode) {
+        print(e);
+      }
+      LogManager.addLog(LogLevel.error, "Network", "$e\n$s");
+      return const Res.error("Network Error");
+    }
+  }
+
+  ///获取主页
+  Future<Res<HomePageData>> getHomePage() async {
+    var res = await get("$baseUrl/promote?$baseData&page=0",
+        expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    }
+    try {
+      var data = HomePageData([]);
+      for (var item in res.data) {
+        var comics = <JmComicBrief>[];
+        for (var comic in item["content"]) {
+          try {
+            var categories = <ComicCategoryInfo>[];
+            if (comic["category"]["id"] != null &&
+                comic["category"]["title"] != null) {
+              categories.add(ComicCategoryInfo(
+                  comic["category"]["id"], comic["category"]["title"]));
+            }
+            if (comic["category_sub"]["id"] != null &&
+                comic["category_sub"]["title"] != null) {
+              categories.add(ComicCategoryInfo(
+                  comic["category_sub"]["id"], comic["category_sub"]["title"]));
+            }
+            comics.add(JmComicBrief(comic["id"], comic["author"], comic["name"],
+                comic["description"] ?? "", categories));
+          } catch (e) {
+            continue;
+          }
         }
+        String type = item["type"];
+        String id = item["id"].toString();
+        if (type == "category_id") {
+          id = item["slug"];
+        }
+        data.items
+            .add(HomePageItem(item["title"], id, comics, type != "promote"));
       }
       return Res(data);
     } catch (e, s) {
+      if (kDebugMode) {
+        print(e);
+      }
       LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
       return Res(null, errorMessage: e.toString());
+    }
+  }
+
+  Future<Res<PromoteList>> getPromoteList(String id) async {
+    var res = await get("$baseUrl/promote_list?$baseData&id=$id&page=0",
+        expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    }
+    try {
+      var list = PromoteList(id, []);
+      list.total = int.parse(res.data["total"]);
+      for (var comic in (res.data["list"])) {
+        var categories = <ComicCategoryInfo>[];
+        if (comic["category"]["id"] != null &&
+            comic["category"]["title"] != null) {
+          categories.add(ComicCategoryInfo(
+              comic["category"]["id"], comic["category"]["title"]));
+        }
+        if (comic["category_sub"]["id"] != null &&
+            comic["category_sub"]["title"] != null) {
+          categories.add(ComicCategoryInfo(
+              comic["category_sub"]["id"], comic["category_sub"]["title"]));
+        }
+        try {
+          list.comics.add(JmComicBrief(comic["id"], comic["author"],
+              comic["name"], comic["description"] ?? "", categories));
+        } catch (e) {
+          //忽略
+        }
+        list.loaded++;
+      }
+      list.page++;
+      return Res(list);
+    } catch (e, s) {
+      if (kDebugMode) {
+        print(e);
+      }
+      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
+      return Res(null, errorMessage: e.toString());
+    }
+  }
+
+  Future<void> loadMorePromoteListComics(PromoteList list) async {
+    if (list.loaded >= list.total) {
+      return;
+    }
+    var res = await get(
+        "$baseUrl/promote_list?$baseData&id=${list.id}&page=${list.page}",
+        expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      return;
+    }
+    try {
+      for (var comic in (res.data["list"])) {
+        var categories = <ComicCategoryInfo>[];
+        if (comic["category"]["id"] != null &&
+            comic["category"]["title"] != null) {
+          categories.add(ComicCategoryInfo(
+              comic["category"]["id"], comic["category"]["title"]));
+        }
+        if (comic["category_sub"]["id"] != null &&
+            comic["category_sub"]["title"] != null) {
+          categories.add(ComicCategoryInfo(
+              comic["category_sub"]["id"], comic["category_sub"]["title"]));
+        }
+        try {
+          list.comics.add(JmComicBrief(comic["id"], comic["author"],
+              comic["name"], comic["description"] ?? "", categories));
+        } catch (e) {
+          //忽视
+        }
+        list.loaded++;
+      }
+      list.page++;
+      return;
+    } catch (e, s) {
+      if (kDebugMode) {
+        print(e);
+      }
+      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
+      return;
     }
   }
 
   Future<Res<List<JmComicBrief>>> getLatest(int page) async {
+    var res = await get("$baseUrl/latest?$baseData&page=$page",
+        expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    }
     try {
-      var res = await get("$baseUrl/albums?o=mr&page=$page");
-      if (res.error) {
-        return Res.fromErrorRes(res);
+      var comics = <JmComicBrief>[];
+      for (var comic in (res.data)) {
+        try {
+          var categories = <ComicCategoryInfo>[];
+          if (comic["category"]["id"] != null &&
+              comic["category"]["title"] != null) {
+            categories.add(ComicCategoryInfo(
+                comic["category"]["id"], comic["category"]["title"]));
+          }
+          if (comic["category_sub"]["id"] != null &&
+              comic["category_sub"]["title"] != null) {
+            categories.add(ComicCategoryInfo(
+                comic["category_sub"]["id"], comic["category_sub"]["title"]));
+          }
+          comics.add(JmComicBrief(comic["id"], comic["author"], comic["name"],
+              comic["description"] ?? "", categories));
+        } catch (e) {
+          continue;
+        }
       }
-      var document = parse(res.data);
-      var (comics, _) = _parsePageComics(document);
-      return Res(comics);
+      return Res(comics, subData: 99999);
     } catch (e, s) {
+      if (kDebugMode) {
+        print(e);
+      }
       LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
       return Res(null, errorMessage: e.toString());
     }
   }
 
-  Future<Res<(List<JmComicBrief>, int)>> getComicsPage(
-      String link, int page) async {
-    var url = "$baseUrl$link";
-
-    if (url.contains("?")) {
-      url = "$url&page=$page";
-    } else {
-      url = "$url?page=$page";
+  ///获取热搜词
+  Future<Res<bool>> getHotTags() async {
+    var res = await get("$baseUrl/hot_tags?$baseData",
+        expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      return Res.fromErrorRes(res);
     }
-    try {
-      var res = await get(url);
-      if (res.error) {
-        return Res.fromErrorRes(res);
-      }
-      var document = parse(res.data);
-      var (comics, maxPage) = _parsePageComics(document);
-      return Res((comics, maxPage));
-    } catch (e, s) {
-      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
-      return Res(null, errorMessage: e.toString());
+    hotTags.clear();
+    for (var s in res.data) {
+      hotTags.add(s);
     }
+    return const Res(true);
   }
 
   Future<Res<List<JmComicBrief>>> searchNew(
       String keyword, int page, ComicsOrder order) async {
     appdata.searchHistory.remove(keyword);
     appdata.searchHistory.add(keyword);
+    keyword = keyword.trim();
+    keyword = keyword.replaceAll('  ', ' ');
+    keyword = Uri.encodeComponent(keyword);
+    keyword = keyword.replaceAll('%20', '+');
     appdata.writeHistory();
-    var res = await getComicsPage(
-        "/search/photos?main_tag=0&search_query=${Uri.encodeComponent(keyword)}&o=$order",
-        page);
+    Res res;
+    if (page != 1) {
+      res = await get(
+          "$baseUrl/search?&search_query=$keyword&o=$order&page=$page",
+          expiredTime: CacheExpiredTime.no);
+    } else {
+      res = await get("$baseUrl/search?&search_query=$keyword&o=$order",
+          expiredTime: CacheExpiredTime.no);
+    }
     if (res.error) {
-      return Res.fromErrorRes(res);
+      return Res(null, errorMessage: res.errorMessage);
     }
-    Future.delayed(const Duration(microseconds: 500), () {
-      StateController.findOrNull<PreSearchController>()?.update();
-    });
-    return Res(res.data.$1, subData: res.data.$2);
-  }
-
-  Future<Res<List<JmComicBrief>>> getLeaderBoard(ComicsOrder order, int page) async{
-    var params = order.value.split("_");
-    var url = "/albums?o=${params[0]}";
-    if(params.length == 2){
-      url = "$url&t=${params[1]}";
-    }
-    var res = await getComicsPage(url, page);
-    if (res.error) {
-      return Res.fromErrorRes(res);
-    }
-    return Res(res.data.$1, subData: res.data.$2);
-  }
-
-  Future<Res<JmComicInfo>> getComicInfo(String id) async {
-    try{
-      var res = await get("$baseUrl/album/$id");
-      if(res.error){
-        return Res.fromErrorRes(res);
-      }
-      var document = parse(res.data);
-      var name = document.querySelector("h1")!.text;
-      var author = <String>[];
-      var tags = <String>[];
-      for(var element in document.querySelectorAll("div.tag-block")){
-        if(element.children.length < 2){
-          break;
-        }
-        if(element.className.contains("hot")){
+    try {
+      var comics = <JmComicBrief>[];
+      for (var comic in (res.data["content"])) {
+        try {
+          var categories = <ComicCategoryInfo>[];
+          if (comic["category"]["id"] != null &&
+              comic["category"]["title"] != null) {
+            categories.add(ComicCategoryInfo(
+                comic["category"]["id"], comic["category"]["title"]));
+          }
+          if (comic["category_sub"]["id"] != null &&
+              comic["category_sub"]["title"] != null) {
+            categories.add(ComicCategoryInfo(
+                comic["category_sub"]["id"], comic["category_sub"]["title"]));
+          }
+          comics.add(JmComicBrief(comic["id"], comic["author"], comic["name"],
+              comic["description"] ?? "", categories));
+        } catch (e) {
           continue;
         }
-        if(element.firstChild!.text!.contains("作者")){
-          author.addAll(element.querySelectorAll("a").map((e) => e.text));
-        } else {
-          tags.addAll(element.querySelectorAll("a").map((e) => e.text.trim()));
+      }
+      Future.delayed(const Duration(microseconds: 500), () {
+        try {
+          StateController.find<PreSearchController>().update();
+        } catch (e) {
+          //跳过
         }
-      }
-      final description = document.querySelectorAll("div.col-lg-7 > div > div.p-t-5.p-b-5")[1].text;
-      final likes = int.tryParse(document.querySelector("span#albim_likes_$id")!
-          .text.toLowerCase().replaceAll("k", "000")) ?? 0;
-      var series = <int, String>{};
-      var epNames = <String>[];
-      for(var element in document.querySelectorAll("div.nav-tab-content div.episode > ul > a")){
-        series[series.length+1] = element.attributes["data-album"]!;
-        epNames.add(element.children[0].nodes[0].text!.replaceAll("\n", " ").replaceAll("\t", "").trim());
-      }
-      if(series.isEmpty){
-        series[1] = id;
-      }
-      var favorite = document.querySelector("i.far.fa-bookmark.fa-2x") == null;
-      var liked = document.querySelector("i.glyphicon.glyphicon-heart.fa-2x")!.attributes["style"] != null;
-      final comments = int.parse(document.querySelector("div#total_video_comments")?.text ?? "0");
-      return Res(JmComicInfo(name, id, author, description, likes, 0, series,
-          tags, _parsePageComics(document).$1, liked, favorite, comments, epNames));
+      });
+      return Res(comics,
+          subData: comics.isEmpty
+              ? 0
+              : (int.parse(res.data["total"]) / res.data["content"].length)
+                  .ceil());
+    } catch (e, s) {
+      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
+      Future.delayed(const Duration(microseconds: 500),
+          () => StateController.find<PreSearchController>().update());
+      return Res(null, errorMessage: e.toString());
     }
-    catch(e, s){
+  }
+
+  ///获取分类信息
+  Future<Res<List<Category>>> getCategories() async {
+    var res = await get("$baseUrl/categories?$baseData");
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    }
+    try {
+      var categories = <Category>[];
+      for (var c in res.data["categories"]) {
+        var subCategories = <SubCategory>[];
+        for (var sc in c["sub_categories"] ?? []) {
+          subCategories.add(SubCategory(sc["CID"], sc["name"], sc["slug"]));
+        }
+        categories.add(Category(c["name"], c["slug"], subCategories));
+      }
+      return Res(categories);
+    } catch (e, s) {
       LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
       return Res(null, errorMessage: e.toString());
     }
   }
 
-  Future<Res<List<String>>> getChapter(String id) async{
-    var res = await get("$baseUrl/photo/$id");
+  Future<Res<List<JmComicBrief>>> getCategoryComics(
+      String category, ComicsOrder order, int page) async {
+    var res = await get(
+        "$baseUrl/categories/filter?$baseData&o=$order&c=${Uri.encodeComponent(category)}&page=$page",
+        expiredTime: CacheExpiredTime.no);
     if (res.error) {
       return Res(null, errorMessage: res.errorMessage);
     }
     try {
-      var document = parse(res.data);
+      var comics = <JmComicBrief>[];
+      for (var comic in (res.data["content"])) {
+        try {
+          var categories = <ComicCategoryInfo>[];
+          if (comic["category"]["id"] != null &&
+              comic["category"]["title"] != null) {
+            categories.add(ComicCategoryInfo(
+                comic["category"]["id"], comic["category"]["title"]));
+          }
+          if (comic["category_sub"]["id"] != null &&
+              comic["category_sub"]["title"] != null) {
+            categories.add(ComicCategoryInfo(
+                comic["category_sub"]["id"], comic["category_sub"]["title"]));
+          }
+          comics.add(JmComicBrief(comic["id"], comic["author"], comic["name"],
+              comic["description"] ?? "", categories));
+        } catch (e) {
+          continue;
+        }
+      }
+      Object total = res.data["total"];
+      if (total is String) {
+        total = int.parse(total);
+      }
+      var current = res.data["content"].length;
+      var pagesCount = 1;
+      if (current != 0) {
+        pagesCount = ((total as int) / current).ceil();
+      }
+      return Res(comics, subData: pagesCount);
+    } catch (e, s) {
+      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
+      return Res(null, errorMessage: e.toString());
+    }
+  }
+
+  Future<Res<JmComicInfo>> getComicInfo(String id) async {
+    var res = await get("$baseUrl/album?comicName=&id=$id",
+        expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      if (res.errorMessage!.contains("Empty data")) {
+        throw Exception("漫畫不存在: id = $id");
+      }
+      return Res(null, errorMessage: res.errorMessage);
+    }
+    try {
+      var author = <String>[];
+      for (var s in res.data["author"] ?? "未知") {
+        author.add(s);
+      }
+      var series = <int, String>{};
+      var epNames = <String>[];
+      int sort = 1;
+      for (var s in res.data["series"] ?? []) {
+        series[sort] = s["id"];
+        sort++;
+        var name = s["name"] as String;
+        if (name.isEmpty) {
+          name = "第${s["sort"]}話";
+        }
+        epNames.add(name);
+      }
+      var tags = <String>[];
+      for (var s in res.data["tags"] ?? []) {
+        tags.add(s);
+      }
+      var related = <JmComicBrief>[];
+      for (var c in res.data["related_list"] ?? []) {
+        related.add(JmComicBrief(c["id"], c["author"] ?? "Unknown",
+            c["name"] ?? "Unknown", c["description"] ?? "None", []));
+      }
+      return Res(JmComicInfo(
+          res.data["name"] ?? "未知",
+          id,
+          author,
+          res.data["description"] ?? "无",
+          int.parse(res.data["likes"] ?? "0"),
+          int.parse(res.data["total_views"] ?? "0"),
+          series,
+          tags,
+          related,
+          res.data["liked"] ?? false,
+          res.data["is_favorite"] ?? false,
+          int.parse(res.data["comment_total"] ?? "0"),
+          epNames));
+    } catch (e, s) {
+      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
+      return Res(null, errorMessage: e.toString());
+    }
+  }
+
+  Future<Res<bool>> login(String account, String pwd) async {
+    _performingLogin = true;
+    try {
+      var res = await post("$baseUrl/login",
+          "username=${Uri.encodeComponent(account)}&password=${Uri.encodeComponent(pwd)}");
+      if (res.error) {
+        return Res(null, errorMessage: res.errorMessage);
+      }
+      jm.data['name'] = account;
+      appdata.writeData();
+      return const Res(true);
+    } finally {
+      _performingLogin = false;
+    }
+  }
+
+  /// 使用储存的数据进行登录
+  Future<Res<bool>> loginFromAppdata() async {
+    var res = await jm.reLogin();
+    return res ? const Res(true) : const Res.error("error");
+  }
+
+  Future<void> logout() async {
+    await cookieJar.deleteAll();
+  }
+
+  Future<void> likeComic(String id) async {
+    await post("$baseUrl/like", "id=$id&$baseData");
+  }
+
+  ///创建收藏夹
+  Future<Res<bool>> createFolder(String name) async {
+    var res = await post(
+        "$baseUrl/favorite_folder", "type=add&folder_name=$name&$baseData");
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    } else {
+      return const Res(true);
+    }
+  }
+
+  Future<Res<List<JmComicBrief>>> getFolderComicsPage(
+      String id, int page) async {
+    ComicsOrder order =
+        appdata.settings[42] == "0" ? ComicsOrder.latest : ComicsOrder.update;
+    var res = await get(
+        "$baseUrl/favorite?$baseData&page=$page&folder_id=$id&o=$order",
+        expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    }
+    try {
+      var comics = <JmComicBrief>[];
+      for (var comic in (res.data["list"])) {
+        var categories = <ComicCategoryInfo>[];
+        if (comic["category"]["id"] != null &&
+            comic["category"]["title"] != null) {
+          categories.add(ComicCategoryInfo(
+              comic["category"]["id"], comic["category"]["title"]));
+        }
+        if (comic["category_sub"]["id"] != null &&
+            comic["category_sub"]["title"] != null) {
+          categories.add(ComicCategoryInfo(
+              comic["category_sub"]["id"], comic["category_sub"]["title"]));
+        }
+        comics.add(JmComicBrief(comic["id"], comic["author"], comic["name"],
+            comic["description"] ?? "", categories));
+      }
+      int pages;
+      if (comics.isNotEmpty) {
+        pages = (int.parse(res.data["total"]) / comics.length).ceil();
+      } else {
+        pages = 0;
+      }
+      return Res(comics, subData: pages);
+    } catch (e, s) {
+      if (kDebugMode) {
+        print(e);
+      }
+      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
+      return Res(null, errorMessage: e.toString());
+    }
+  }
+
+  ///获取收藏夹
+  Future<Res<Map<String, String>>> getFolders() async {
+    var res = await get("$baseUrl/favorite?$baseData",
+        expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    }
+    try {
+      var folders = <String, String>{};
+      for (var folder in res.data["folder_list"]) {
+        folders[folder["FID"]] = folder["name"];
+      }
+      return Res(folders);
+    } catch (e, s) {
+      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
+      return Res(null, errorMessage: e.toString());
+    }
+  }
+
+  ///移动漫画至指定的收藏夹
+  Future<Res<bool>> moveToFolder(String comicId, String folderId) async {
+    var res = await post("$baseUrl/favorite_folder",
+        "type=move&folder_id=$folderId&aid=$comicId&$baseData");
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    } else {
+      return const Res(true);
+    }
+  }
+
+  ///收藏漫画, 如果folder为null, 则为取消收藏
+  Future<Res<bool>> favorite(String id, String? folder) async {
+    try {
+      if (folder != null) {
+        var res = await post("$baseUrl/favorite", "aid=$id&$baseData");
+        if (res.data["type"] != "add") {
+          res = await post("$baseUrl/favorite", "aid=$id&$baseData");
+        }
+        Res res2 = const Res(true);
+        if (folder != "0") {
+          res2 = await moveToFolder(id, folder);
+        }
+        if (res.error || res2.error) {
+          return Res(null, errorMessage: res.errorMessage);
+        } else {
+          return const Res(true);
+        }
+      } else {
+        var res = await post("$baseUrl/favorite", "aid=$id&$baseData");
+        if (res.data["type"] == "add") {
+          res = await post("$baseUrl/favorite", "aid=$id&$baseData");
+        }
+        return const Res(false);
+      }
+    } catch (e) {
+      return Res(null, errorMessage: e.toString());
+    }
+  }
+
+  ///获取漫画图片
+  Future<Res<List<String>>> getChapter(String id) async {
+    var res = await get("$baseUrl/chapter?&id=$id");
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    }
+    try {
       var images = <String>[];
-      for (var s in document.querySelectorAll("div.center.scramble-page")) {
-        images.add(getJmImageUrl(s.id, id));
+      for (var s in res.data["images"]) {
+        images.add(getJmImageUrl(s, id));
       }
       return Res(images);
     } catch (e, s) {
@@ -361,150 +743,51 @@ class JmNetwork {
     }
   }
 
-  Future<Res<bool>> login(String account, String pwd) async {
-    var res = await post("$baseUrl/login",
-        "username=$account&password=${Uri.encodeComponent(pwd)}&login_remember=on&submit_login="
-        , "application/x-www-form-urlencoded");
-    if(res.error){
-      return Res.fromErrorRes(res);
-    }
-    if(res.data == "Redirect"){
-      appdata.jmName = account;
-      appdata.jmPwd = pwd;
-      appdata.writeData();
-      return const Res(true);
-    }
-    return const Res(null, errorMessage: "Failed to login");
+  ///获取scramble
+  ///
+  /// 此函数未使用, 因为似乎所有漫画的scramble都一样
+  Future<String?> getScramble(String id) async {
+    var dio = Dio(
+        getHeader(DateTime.now().millisecondsSinceEpoch ~/ 1000, byte: false))
+      ..interceptors.add(LogInterceptor());
+    dio.interceptors.add(CookieManager(cookieJar));
+    var res = await dio.get(
+        "$baseUrl/chapter_view_template?id=$id&mode=vertical&page=0&app_ima_shunt=NaN&express=off");
+    var exp = RegExp(r"(?<=var scramble_id = )\w+");
+    return exp.firstMatch(res.data)!.group(0);
   }
 
-  Future<void> logout() async {
-    var cookies = await cookieJar!.loadForRequest(Uri.parse(baseUrl));
-    var cookie = cookies.firstWhereOrNull((element) => element.name == "cf_clearance");
-    await cookieJar!.deleteAll();
-    if(cookie != null) {
-      cookieJar!.saveFromResponse(Uri.parse(baseUrl), [cookie]);
+  /// 获取评论, 获取章节评论需要mode = all
+  Future<Res<List<Comment>>> getComment(String id, int page,
+      [String mode = "manhua"]) async {
+    var res = await get("$baseUrl/forum?mode=$mode&aid=$id&page=$page",
+        expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
     }
-    appdata.jmName = "";
-    appdata.jmPwd = "";
-    await appdata.writeData();
-  }
+    try {
+      String parseContent(String input) {
+        var fragment = parseFragment(input);
+        return fragment.querySelector("div")?.text ?? "";
+      }
 
-  Future<Res<bool>> likeComic(String id) async {
-    var res = await post("$baseUrl/ajax/vote_album", "album_id=$id&vote=likes"
-        , "application/x-www-form-urlencoded; charset=UTF-8");
-    if(res.error){
-      return Res.fromErrorRes(res);
-    }
-    return const Res(true);
-  }
-
-  Future<Res<List<JmComicBrief>>> getFolderComicsWithPage(
-      String id, int page) async {
-    ComicsOrder order =
-      appdata.settings[42] == "0" ? ComicsOrder.latest : ComicsOrder.update;
-    var folderIdParam = "";
-    if(id != "0"){
-      folderIdParam = "folder=$id&";
-    }
-    var res = await get("$baseUrl/user/${appdata.jmName}/favorite/albums?${folderIdParam}o=$order&page=$page");
-    if(res.error){
-      return Res.fromErrorRes(res);
-    }
-    try{
-      var document = parse(res.data);
-      var comics = <JmComicBrief>[];
-      for(final element in document.querySelectorAll("div.col-xs-6.col-sm-3.col-md-3.m-b-15.list-col")){
-        final id = element.querySelector("a")!.attributes["href"]!.nums;
-        final title = element.querySelector("div.video-title")!.text;
-        comics.add(JmComicBrief(id, "", title, "", [], []));
-      }
-      try {
-        var pageLis = document.querySelectorAll(
-            "ul.pagination.pagination-lg > li");
-        var pages = int.tryParse(pageLis[pageLis.length - 2].text);
-        return Res(comics, subData: pages!);
-      }
-      catch(e){
-        return Res(comics, subData: 1);
-      }
-    }
-    catch(e, s){
-      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
-      return Res(null, errorMessage: e.toString());
-    }
-  }
-
-  Future<Res<Map<String, String>>> getFolders() async {
-    var res = await get("$baseUrl/user/${appdata.jmName}/favorite/albums");
-    if(res.error){
-      if(res.errorMessage!.contains("301")){
-        return const Res(null, errorMessage: "Login Required");
-      }
-      return Res.fromErrorRes(res);
-    }
-    try{
-      var document = parse(res.data);
-      var folders = <String, String>{};
-      for(var element in document.querySelectorAll("div#folder_list > ul > a")){
-        if(element.attributes["href"] != null && element.attributes["href"]!.contains("folder")){
-          var id = element.attributes["href"]!.split("folder=").last;
-          var name = element.querySelector("li")!.text.trim();
-          folders[id] = name;
+      var comments = <Comment>[];
+      for (var c in res.data["list"]) {
+        var reply = <Comment>[];
+        for (var r in c["replys"] ?? []) {
+          reply.add(Comment(r["CID"], getJmAvatarUrl(r["photo"]), r["username"],
+              r["addtime"], parseContent(r["content"]), []));
         }
+        comments.add(Comment(c["CID"], getJmAvatarUrl(c["photo"]),
+            c["username"], c["addtime"], parseContent(c["content"]), reply));
       }
-      return Res(folders);
-    }
-    catch(e, s){
-      LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
-      return Res(null, errorMessage: e.toString());
-    }
-  }
-
-  Future<Res<bool>> favorite(String comicId, String? folderId) async {
-    Res res;
-    if(folderId != null) {
-      res = await post("https://18comic.vip/ajax/favorite_album",
-          "album_id=$comicId&fid=$folderId"
-          , "application/x-www-form-urlencoded; charset=UTF-8");
-    } else {
-      res = await post("https://18comic.vip/ajax/delete_favorite_album",
-          "album_id=$comicId"
-          , "application/x-www-form-urlencoded; charset=UTF-8");
-    }
-    if(res.error){
-      return Res.fromErrorRes(res);
-    }
-    return const Res(true);
-  }
-
-  Future<Res<List<Comment>>> getComment(String id, int page) async {
-    List<Comment> parseComments(dom.Document element) {
-      var res = <Comment>[];
-      for(var e in element.querySelectorAll("div.panel.panel-default.timeline-panel")){
-        final id = e.querySelector("div.timeline")!.attributes["data-cid"]!;
-        final avatar = e.querySelector("div.timeline-left > a > img")!.attributes["src"];
-        final name = e.querySelector("span.timeline-username")!.text.trim();
-        final time = e.querySelector("div.timeline-date")!.text.trim();
-        final content = e.querySelector("div.timeline-content")!.text.trim();
-        res.add(Comment(id, "$baseUrl$avatar", name, time, content, []));
-      }
-      return res;
-    }
-
-    try{
-      var res = await post("$baseUrl/ajax/album_pagination",
-          "video_id=$id&page=$page", "application/x-www-form-urlencoded; charset=UTF-8");
-      if(res.error){
-        return Res.fromErrorRes(res);
-      }
-      var document = parse(res.data);
-      var comments = parseComments(document);
-      if(comments.isEmpty){
-        return const Res(null, errorMessage: "No comments");
-      }
-      return Res(comments);
-    }
-    catch(e, s){
+      return Res(
+        comments,
+        subData: res.data["total"] is int
+            ? res.data["total"]
+            : (int.tryParse(res.data["total"]) ?? 1),
+      );
+    } catch (e, s) {
       LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
       return Res(null, errorMessage: e.toString());
     }
@@ -512,107 +795,83 @@ class JmNetwork {
 
   Future<Res<bool>> deleteFolder(String id) async {
     var res = await post(
-        "$baseUrl/user/${appdata.jmName}/favorite/albums",
-        "deletefolder-name=$id",
-        "application/x-www-form-urlencoded"
-    );
-    if(res.error){
-      return Res.fromErrorRes(res);
+        "$baseUrl/favorite_folder", "type=del&folder_id=$id&$baseData");
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage);
+    } else {
+      if (res.data["code"] == 400) {
+        return Res(null, errorMessage: res.data["msg"]);
+      }
+      return const Res(true);
     }
-    return const Res(true);
   }
 
+  ///获取每周必看列表
+  ///
+  /// 返回Map, 键为ID, 值为名称
   Future<Res<Map<String, String>>> getWeekRecommendation() async {
-    var res = await get("$baseUrl/week");
-    if(res.error){
-      return Res.fromErrorRes(res);
+    var res =
+        await get("$baseUrl/week?$baseData", expiredTime: CacheExpiredTime.no);
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage!);
     }
-    try{
-      var document = parse(res.data);
-      var weeks = <String, String>{};
-      for(var element in document.querySelectorAll("li.week-time-item > a")){
-        final id = element.attributes["href"]!.nums;
-        final name = element.querySelector("p.week-time")!.text;
-        weeks[id] = name;
+    try {
+      Map<String, String> categories = {};
+      for (var c in res.data["categories"]) {
+        categories[c["id"]] = c["time"];
       }
-      return Res(weeks);
-    }
-    catch(e, s){
+      return Res(categories);
+    } catch (e, s) {
       LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
       return Res(null, errorMessage: e.toString());
     }
   }
 
+  ///获取单个每周必看中的漫画
+  ///
+  /// 不需要传递page变量, 因为只有一页
   Future<Res<List<JmComicBrief>>> getWeekRecommendationComics(
       String id, WeekRecommendationType type) async {
-    var res = await get("$baseUrl/week/$id?type=$type");
-    if(res.error){
-      return Res.fromErrorRes(res);
+    var res = await get("$baseUrl/week/filter?$baseData&id=$id&page=0$type");
+    if (res.error) {
+      return Res(null, errorMessage: res.errorMessage!);
     }
-    try{
-      var document = parse(res.data);
+    try {
       var comics = <JmComicBrief>[];
-      for(var element in document.querySelectorAll("div.weekly-video-item")){
-        final id = element.querySelector("a")!.attributes["href"]!.split("/")
-            .firstWhere((element) => element.isNum);
-        final name = element.querySelector("p.video-title")!.text;
-        final author = element.querySelectorAll("p.title-truncate > a").map((e) => e.text);
-        final category = element.querySelector("div.label-category")!.text;
-        final tags = element.querySelectorAll("a.label-category").map((e) => e.text);
-        comics.add(JmComicBrief(id, author.first, name, "",
-            [ComicCategoryInfo("", category)], tags.toList()));
+      for (var comic in (res.data["list"])) {
+        var categories = <ComicCategoryInfo>[];
+        if (comic["category"]["id"] != null &&
+            comic["category"]["title"] != null) {
+          categories.add(ComicCategoryInfo(
+              comic["category"]["id"], comic["category"]["title"]));
+        }
+        if (comic["category_sub"]["id"] != null &&
+            comic["category_sub"]["title"] != null) {
+          categories.add(ComicCategoryInfo(
+              comic["category_sub"]["id"], comic["category_sub"]["title"]));
+        }
+        comics.add(JmComicBrief(comic["id"], comic["author"], comic["name"],
+            comic["description"] ?? "", categories));
       }
-      return Res(comics, subData: 1);
-    }
-    catch(e, s){
+      return Res(comics);
+    } catch (e, s) {
       LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
       return Res(null, errorMessage: e.toString());
     }
   }
 
-  Future<Res<bool>> comment(String aid, String content) async {
-    var res = await post("$baseUrl/ajax/album_comment",
-        "video_id=$aid&comment=${Uri.encodeComponent(content)}&oringinator=&status=false",
-        "application/x-www-form-urlencoded"
-    );
-    if(res.error){
-      return Res.fromErrorRes(res);
+  Future<Res<dynamic>> comment(String aid, String content) async {
+    var res = await post("$baseUrl/comment",
+        "comment=${Uri.encodeComponent(content)}&status=undefined&aid=$aid&$baseData");
+    if (res.error) {
+      return res;
+    } else {
+      return Res(res.data["msg"]);
     }
-    var data = const JsonDecoder().convert(res.data);
-    if(data["err"] == true){
-      return const Res(null, errorMessage: "Failed to comment");
-    }
-    return const Res(true);
-  }
-
-  Future<Res<bool>> createFolder(String folder) async{
-    var res = await post(
-        "$baseUrl/user/${appdata.jmName}/favorite/albums",
-        "addfolder-name=$folder",
-        "application/x-www-form-urlencoded"
-    );
-    if(res.error){
-      return Res.fromErrorRes(res);
-    }
-    return const Res(true);
   }
 }
 
-enum WeekRecommendationType {
-  korean("hanman"),
-  manga("manga"),
-  another("another");
-
-  const WeekRecommendationType(this.value);
-
-  final String value;
-
-  @override
-  String toString() => value;
-}
-
-final jmNetwork = JmNetwork();
-
+///禁漫漫画排序模式
 enum ComicsOrder {
   ///最新
   latest("mr"),
@@ -642,5 +901,29 @@ enum ComicsOrder {
   String toString() => value;
 
   final String value;
+
   const ComicsOrder(this.value);
+
+  static ComicsOrder fromValue(String value) {
+    for (var v in ComicsOrder.values) {
+      if (v.value == value) return v;
+    }
+    throw UnimplementedError();
+  }
 }
+
+///每周必看的类型
+enum WeekRecommendationType {
+  korean("&type=hanman"),
+  manga("&type=manga"),
+  another("&type=another");
+
+  const WeekRecommendationType(this.value);
+
+  final String value;
+
+  @override
+  String toString() => value;
+}
+
+var jmNetwork = JmNetwork();

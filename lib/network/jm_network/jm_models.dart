@@ -1,4 +1,6 @@
-import '../../base.dart';
+import 'package:pica_comic/foundation/history.dart';
+import 'package:pica_comic/network/base_comic.dart';
+import 'package:pica_comic/network/jm_network/jm_image.dart';
 
 class HomePageData {
   List<HomePageItem> items;
@@ -15,27 +17,33 @@ class HomePageItem {
   HomePageItem(this.name, this.id, this.comics, this.category);
 }
 
-class JmComicBrief {
+class JmComicBrief extends BaseComic {
+  @override
   String id;
   String author;
   String name;
+  @override
   String description;
   List<ComicCategoryInfo> categories;
-  List<String> tags;
+  @override
+  List<String> get tags => categories.map((e) => e.name).toList();
 
-  JmComicBrief(this.id, this.author, this.name, this.description,
-      this.categories, this.tags,
-      {bool ignoreExamination = false}) {
-    if (ignoreExamination) return;
-    bool block = false;
-    for (var key in appdata.blockingKeyword) {
-      block =
-          block || name.contains(key) || author == key || tags.contains(key);
-    }
-    if (block) {
-      throw Error();
-    }
-  }
+  JmComicBrief(
+    this.id,
+    this.author,
+    this.name,
+    this.description,
+    this.categories
+  );
+
+  @override
+  String get cover => getJmCoverUrl(id);
+
+  @override
+  String get subTitle => author;
+
+  @override
+  String get title => name;
 }
 
 class ComicCategoryInfo {
@@ -85,19 +93,7 @@ class SubCategory {
   SubCategory(this.cid, this.name, this.slug);
 }
 
-class CategoryComicsRes {
-  String category;
-  String sort;
-  int loaded;
-  int total;
-  int loadedPage = 1;
-  List<JmComicBrief> comics;
-
-  CategoryComicsRes(this.category, this.sort, this.loaded, this.total,
-      this.loadedPage, this.comics);
-}
-
-class JmComicInfo {
+class JmComicInfo with HistoryMixin {
   String name;
   String id;
   List<String> author;
@@ -176,6 +172,24 @@ class JmComicInfo {
         favorite = false,
         comments = 0,
         epNames = List.from(map["epNames"] ?? []);
+
+  JmComicBrief toBrief() =>
+      JmComicBrief(id, author.firstOrNull ?? "", name, description, []);
+
+  @override
+  String get cover => getJmCoverUrl(id);
+
+  @override
+  HistoryType get historyType => HistoryType.jmComic;
+
+  @override
+  String get subTitle => author.firstOrNull ?? '';
+
+  @override
+  String get target => id;
+
+  @override
+  String get title => name;
 }
 
 class Comment {

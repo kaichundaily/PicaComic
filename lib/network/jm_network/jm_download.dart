@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:pica_comic/base.dart';
@@ -14,6 +15,7 @@ class DownloadedJmComic extends DownloadedItem {
   JmComicInfo comic;
   double? size;
   List<int> downloadedChapters;
+
   DownloadedJmComic(this.comic, this.size, this.downloadedChapters);
 
   Map<String, dynamic> toMap() => {
@@ -46,9 +48,10 @@ class DownloadedJmComic extends DownloadedItem {
   List<int> get downloadedEps => downloadedChapters;
 
   @override
-  List<String> get eps => comic.epNames.isEmpty ? (List<String>.generate(
-      comic.series.isEmpty ? 1 : comic.series.length,
-      (index) => "第${index + 1}章")) : comic.epNames;
+  List<String> get eps => comic.epNames.isEmpty
+      ? (List<String>.generate(comic.series.isEmpty ? 1 : comic.series.length,
+          (index) => "第${index + 1}章"))
+      : comic.epNames;
 
   @override
   String get name => comic.name;
@@ -67,10 +70,13 @@ class DownloadedJmComic extends DownloadedItem {
 
   @override
   set comicSize(double? value) => size = value;
+
+  @override
+  List<String> get tags => comic.tags;
 }
 
 class JmDownloadingItem extends DownloadingItem {
-  JmDownloadingItem(this.comic, super.path, this._downloadEps, super.whenFinish,
+  JmDownloadingItem(this.comic, this._downloadEps, super.whenFinish,
       super.whenError, super.updateInfo, super.id,
       {super.type = DownloadType.jm});
 
@@ -83,51 +89,25 @@ class JmDownloadingItem extends DownloadingItem {
   String get cover => getJmCoverUrl(comic.id);
 
   @override
-  Future<void> saveInfo() async {
-    var file = File("$path/$id/info.json");
-    var previous = <int>[];
-    if (DownloadManager().downloadedJmComics.contains(id)) {
-      var comic = await DownloadManager().getJmComicFormId(id);
-      previous = comic.downloadedEps;
-    }
-    if (file.existsSync()) {
-      file.deleteSync();
-    }
-    file.createSync();
-    var downloadEps = (_downloadEps + previous).toSet().toList();
-    downloadEps.sort();
-    var downloadedItem = DownloadedJmComic(
-        comic, await getFolderSize(Directory("$path$pathSep$id")), downloadEps);
-    var json = jsonEncode(downloadedItem.toMap());
-    await file.writeAsString(json);
-  }
-
-  @override
   String get title => comic.name;
 
-  @override
-  Future<Uint8List> getImage(String link) async{
-    var bookId = "";
-    for (int i = link.length - 1; i >= 0; i--) {
-      if (link[i] == '/') {
-        bookId = link.substring(i + 1, link.length - 5);
-        break;
-      }
-    }
-    await for(var s in ImageManager()
-        .getJmImage(link, {},
-        epsId: comic.series[links!.keys.toList()[downloadingEp]]!,
-        scrambleId: "220980",
-        bookId: bookId)){
-      if(s.finished){
-        return s.getFile().readAsBytesSync();
-      }
-    }
-    throw Exception("Failed to download image");
-  }
+  Future<void> getOneEp(int key, Map<int, List<String>> res) async {
+    if (res[key] != null) return;
 
-  @override
-  int get allowedLoadingNumbers => 3;
+    int retry = 0;
+
+    while (retry < 3) {
+      try {
+        res[key] = (await JmNetwork().getChapter(comic.series[key]!)).data;
+        return;
+      } catch (e) {
+        await Future.delayed(const Duration(seconds: 3));
+        retry++;
+      }
+    }
+
+    throw Exception("Failed to get chapter");
+  }
 
   @override
   Future<Map<int, List<String>>> getLinks() async {
@@ -135,15 +115,22 @@ class JmDownloadingItem extends DownloadingItem {
       comic.series[1] = id.replaceFirst("jm", "");
     }
     var res = <int, List<String>>{};
+    var futures = <Future>[];
     for (var key in comic.series.keys.toList()) {
-      if (!_downloadEps.contains(key-1)) continue;
-      res[key] = (await JmNetwork().getChapter(comic.series[key]!)).data;
+      if (!_downloadEps.contains(key - 1)) continue;
+      futures.add(getOneEp(key, res));
+      await Future.delayed(const Duration(milliseconds: 200));
+      if (futures.length % 5 == 0) {
+        await Future.wait(futures);
+        futures.clear();
+      }
     }
+    await Future.wait(futures);
     return res;
   }
 
   @override
-  void loadImageToCache(String link) {
+  Stream<DownloadProgress> downloadImage(String link) {
     var bookId = "";
     for (int i = link.length - 1; i >= 0; i--) {
       if (link[i] == '/') {
@@ -151,28 +138,43 @@ class JmDownloadingItem extends DownloadingItem {
         break;
       }
     }
-    addStreamSubscription(ImageManager()
-        .getJmImage(link, {},
-          epsId: comic.series[links!.keys.toList()[downloadingEp]]!,
-          scrambleId: "220980",
-          bookId: bookId)
-        .listen((event) {}));
+    return ImageManager().getJmImage(
+      link,
+      {},
+      epsId: comic.series[links!.keys.toList()[downloadingEp]]!,
+      scrambleId: "220980",
+      bookId: bookId,
+    );
   }
 
   @override
   Map<String, dynamic> toMap() => {
-    "comic": comic.toJson(),
-    "_downloadEps": _downloadEps,
-    ...super.toBaseMap()
-  };
+        "comic": comic.toJson(),
+        "_downloadEps": _downloadEps,
+        ...super.toBaseMap()
+      };
 
   JmDownloadingItem.fromMap(
       Map<String, dynamic> map,
       DownloadProgressCallback whenFinish,
       DownloadProgressCallback whenError,
       DownloadProgressCallbackAsync updateInfo,
-      String id):
-        comic = JmComicInfo.fromMap(map["comic"]),
+      String id)
+      : comic = JmComicInfo.fromMap(map["comic"]),
         _downloadEps = List<int>.from(map["_downloadEps"]),
         super.fromMap(map, whenFinish, whenError, updateInfo);
+
+  @override
+  FutureOr<DownloadedItem> toDownloadedItem() async {
+    var previous = <int>[];
+    if (DownloadManager().isExists(id)) {
+      var comic =
+          (await DownloadManager().getComicOrNull(id))! as DownloadedJmComic;
+      previous = comic.downloadedEps;
+    }
+    var downloadEps = (_downloadEps + previous).toSet().toList();
+    downloadEps.sort();
+    return DownloadedJmComic(
+        comic, await getFolderSize(Directory(path)), downloadEps);
+  }
 }

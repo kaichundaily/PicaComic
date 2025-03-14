@@ -6,7 +6,7 @@ import 'package:pica_comic/network/hitomi_network/search.dart';
 import 'package:pica_comic/tools/extensions.dart';
 import '../../base.dart';
 import '../../foundation/log.dart';
-import '../proxy.dart';
+import '../http_client.dart';
 import '../res.dart';
 import 'fetch_data.dart';
 import 'hitomi_models.dart';
@@ -19,7 +19,7 @@ class HiNetwork{
 
   static HiNetwork? cache;
 
-  final baseUrl = "https://hitomi.la/";
+  final baseUrl = "https://hitomi.la";
 
   ///基本的get请求
   Future<Res<String>> get(String url, {CacheExpiredTime expiredTime=CacheExpiredTime.short}) async{
@@ -79,7 +79,9 @@ class HiNetwork{
       var artist = comicDiv.querySelector("div.artist-list a")?.text??"N/A";
       String cover;
       try {
-        cover = comicDiv.querySelector("div.dj-img1 > picture > source")!
+        cover = comicDiv.querySelector("div.dj-img1 > picture > source")
+            ?.attributes["data-srcset"] ??
+            comicDiv.querySelector("div.cg-img1 > picture > source")!
             .attributes["data-srcset"]!;
         cover = cover.substring(2);
         cover = "https://a$cover";
@@ -106,26 +108,11 @@ class HiNetwork{
         }
       }
       var time = comicDiv.querySelector("div.dj-content > p")!.text;
-      //检查屏蔽词
-      if(appdata.blockingKeyword.contains(name)||
-          appdata.blockingKeyword.contains(artist)){
-        return const Res(null, errorMessage: "block");
-      }
-      bool flag = false;
-      for(var tag in tags){
-        if(appdata.blockingKeyword.contains(tag.name)){
-          flag = true;
-          break;
-        }
-      }
-      if(flag){
-        return const Res(null, errorMessage: "block");
-      }
       return Res(HitomiComicBrief(name, type, lang, tags, time, artist, link, cover));
     }
     catch(e, s){
       LogManager.addLog(LogLevel.error, "Data Analysis", "$e\n$s");
-      return Res(null, errorMessage: "解析失败: ${e.toString()}");
+      return Res(null, errorMessage: e.toString());
     }
   }
 
@@ -154,6 +141,10 @@ class HiNetwork{
     }else {
       id = RegExp(r"\d+(?=\.html)").firstMatch(target)![0]!;
     }
+    var brief = await getComicInfoBrief(id);
+    if(brief.error){
+      return Res(null, errorMessage: brief.errorMessage!);
+    }
     var res = await get("https://ltn.hitomi.la/galleries/$id.js");
     if(res.error){
       return Res(null, errorMessage: res.errorMessage!);
@@ -180,11 +171,12 @@ class HiNetwork{
       List<int>.from(json["related"]),
       json["type"],
       List<String>.from((json["artists"]??[]).map((e) => e["artist"]).toList()),
-      json["language_localname"],
+      json["language_localname"] ?? "",
       tags,
       json["date"],
       files,
       List<String>.from((json["groups"]??[]).map((e) => e["group"]).toList()),
+      brief.data.cover,
     ));
   }
 }

@@ -1,4 +1,6 @@
 import "package:pica_comic/base.dart";
+import "package:pica_comic/foundation/history.dart";
+import "package:pica_comic/network/base_comic.dart";
 
 class Profile {
   String id;
@@ -53,30 +55,34 @@ class InitData {
   InitData(this.imageServer, this.fileServer);
 }
 
-class ComicItemBrief {
+class ComicItemBrief extends BaseComic{
+  @override
   String title;
   String author;
   int likes;
   String path;
+  @override
   String id;
+  @override
   List<String> tags;
   int? pages;
 
-  ComicItemBrief(this.title, this.author, this.likes, this.path, this.id, this.tags, {bool ignoreExamination = false, this.pages}){
-    if(ignoreExamination) return;
-    bool block = false;
-    for(var key in appdata.blockingKeyword){
-      block = block || title.contains(key) || author==key || tags.contains(key);
-    }
-    if(block){
-      throw Error();
-    }
-  }
+  ComicItemBrief(this.title, this.author, this.likes, this.path, this.id, this.tags, {this.pages});
+
+  @override
+  String get cover => path;
+
+  @override
+  String get description => "$likes pages";
+
+  @override
+  String get subTitle => author;
 }
 
-class ComicItem {
+class ComicItem with HistoryMixin{
   String id;
   Profile creator;
+  @override
   String title;
   String description;
   String thumbUrl;
@@ -114,7 +120,7 @@ class ComicItem {
       this.recommendation
       );
   ComicItemBrief toBrief(){
-    return ComicItemBrief(title, author, likes, thumbUrl, id, [], ignoreExamination: true);
+    return ComicItemBrief(title, author, likes, thumbUrl, id, []);
   }
 
   Map<String,dynamic> toJson()=>{
@@ -155,6 +161,18 @@ class ComicItem {
     pagesCount = json["pagesCount"],
     eps = [],
     recommendation = [];
+
+  @override
+  String get cover => thumbUrl;
+
+  @override
+  HistoryType get historyType => HistoryType.picacg;
+
+  @override
+  String get subTitle => author;
+
+  @override
+  String get target => id;
 }
 
 class Comment {

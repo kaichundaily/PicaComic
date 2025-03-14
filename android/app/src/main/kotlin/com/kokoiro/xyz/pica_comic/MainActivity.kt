@@ -9,9 +9,12 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugins.GeneratedPluginRegistrant
 import android.content.Intent
-import android.provider.Settings
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Environment
+import android.Manifest
+import androidx.core.content.ContextCompat
+import com.google.android.gms.common.GoogleApiAvailability
 
 class MainActivity: FlutterFragmentActivity() {
     var volumeListen = VolumeListen()
@@ -65,6 +68,12 @@ class MainActivity: FlutterFragmentActivity() {
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
 
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger,"pica_comic/playServer").setMethodCallHandler{
+                _, res ->
+            val flag = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(this) == com.google.android.gms.common.ConnectionResult.SUCCESS
+            res.success(flag)
+        }
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger,"pica_comic/settings").setMethodCallHandler{
                 call, res ->
             if(call.method == "link") {
@@ -73,17 +82,26 @@ class MainActivity: FlutterFragmentActivity() {
                     Uri.parse("package:com.github.wgh136.pica_comic"),
                 )
                 startActivity(intent)
+                res.success(null)
             } else if(call.method == "files") {
-                val intent = Intent(
-                    android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                    Uri.parse("package:com.github.wgh136.pica_comic"),
-                )
+                val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                } else {
+                    Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                }
+                intent.data = Uri.parse("package:com.github.wgh136.pica_comic")
                 startActivity(intent)
+                res.success(null)
             } else if(call.method == "files_check") {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     res.success(Environment.isExternalStorageManager())
+                } else {
+                    res.success(
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                            && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED)
                 }
             }
+
         }
     }
 

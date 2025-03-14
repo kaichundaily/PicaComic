@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:pica_comic/network/download_model.dart';
@@ -40,7 +41,8 @@ class DownloadedHitomiComic extends DownloadedItem {
   String get name => comic.name;
 
   @override
-  String get subTitle => (comic.artists ?? ["未知"]).isEmpty ? "未知" : (comic.artists ?? ["未知"])[0];
+  String get subTitle =>
+      (comic.artists ?? ["未知"]).isEmpty ? "未知" : (comic.artists ?? ["未知"])[0];
 
   @override
   DownloadType get type => DownloadType.hitomi;
@@ -52,11 +54,14 @@ class DownloadedHitomiComic extends DownloadedItem {
 
   @override
   set comicSize(double? value) => size = value;
+
+  @override
+  List<String> get tags => comic.tags.map((e) => e.name).toList();
 }
 
 class HitomiDownloadingItem extends DownloadingItem {
-  HitomiDownloadingItem(this.comic, super.path, this._coverPath, this.link, super.whenFinish,
-      super.whenError, super.updateInfo, super.id,
+  HitomiDownloadingItem(this.comic, this._coverPath, this.link,
+      super.whenFinish, super.whenError, super.updateInfo, super.id,
       {super.type = DownloadType.hitomi});
 
   final String _coverPath;
@@ -66,7 +71,6 @@ class HitomiDownloadingItem extends DownloadingItem {
 
   ///画廊链接
   final String link;
-
 
   late final _headers = {
     "User-Agent": webUA,
@@ -79,63 +83,47 @@ class HitomiDownloadingItem extends DownloadingItem {
   @override
   String get cover => _coverPath;
 
-  ///储存漫画信息
-  @override
-  Future<void> saveInfo() async {
-    var file = File("$path/$id/info.json");
-    var item = DownloadedHitomiComic(
-        comic, await getFolderSize(Directory("$path$pathSep$id")), link, _coverPath);
-    var json = jsonEncode(item.toMap());
-    await file.writeAsString(json);
-  }
-
   @override
   String get title => comic.name;
 
   @override
-  Future<Uint8List> getImage(String link) async{
-    await for(var s in ImageManager().getHitomiImage(HitomiFile.fromMap(
-        const JsonDecoder().convert(link)), id.replaceFirst("hitomi", ""))){
-      if(s.finished){
-        return s.getFile().readAsBytesSync();
-      }
-    }
-    throw Exception("Fail to download image");
+  Future<Map<int, List<String>>> getLinks() async {
+    return {
+      0: List<String>.generate(comic.files.length,
+          (index) => const JsonEncoder().convert(comic.files[index].toMap()))
+    };
   }
 
   @override
-  Future<Map<int, List<String>>> getLinks() async{
-    return {0: List<String>.generate(comic.files.length,
-            (index) => const JsonEncoder().convert(comic.files[index].toMap()))};
+  Stream<DownloadProgress> downloadImage(String link) {
+    return ImageManager().getHitomiImage(
+      HitomiFile.fromMap(const JsonDecoder().convert(link)),
+      id.replaceFirst("hitomi", ""),
+    );
   }
-
-  @override
-  void loadImageToCache(String link) {
-    addStreamSubscription(ImageManager().getHitomiImage(HitomiFile.fromMap(
-        const JsonDecoder().convert(link)), id.replaceFirst("hitomi", ""))
-        .listen((event) {}));
-  }
-
-  @override
-  String? get imageExtension => ".webp";
 
   @override
   Map<String, dynamic> toMap() => {
-    "comic": comic.toMap(),
-    "_coverPath": _coverPath,
-    "link": link,
-    ...super.toBaseMap()
-  };
+        "comic": comic.toMap(),
+        "_coverPath": _coverPath,
+        "link": link,
+        ...super.toBaseMap()
+      };
 
   HitomiDownloadingItem.fromMap(
       Map<String, dynamic> map,
       DownloadProgressCallback whenFinish,
       DownloadProgressCallback whenError,
       DownloadProgressCallbackAsync updateInfo,
-      String id
-      ):comic=HitomiComic.fromMap(map["comic"]),
+      String id)
+      : comic = HitomiComic.fromMap(map["comic"]),
         _coverPath = map["_coverPath"],
         link = map["link"],
         super.fromMap(map, whenFinish, whenError, updateInfo);
-}
 
+  @override
+  FutureOr<DownloadedItem> toDownloadedItem() async {
+    return DownloadedHitomiComic(
+        comic, await getFolderSize(Directory(path)), link, _coverPath);
+  }
+}

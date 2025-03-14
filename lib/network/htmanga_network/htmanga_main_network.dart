@@ -1,17 +1,18 @@
 import 'dart:convert';
 import 'dart:math';
-import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
-import 'package:dio_cookie_manager/dio_cookie_manager.dart';
+import 'package:pica_comic/comic_source/built_in/ht_manga.dart';
 import 'package:pica_comic/foundation/app.dart';
 import 'package:pica_comic/foundation/log.dart';
 import 'package:pica_comic/network/cache_network.dart';
+import 'package:pica_comic/network/cookie_jar.dart';
 import 'package:pica_comic/network/htmanga_network/models.dart';
-import 'package:pica_comic/network/log_dio.dart';
+import 'package:pica_comic/network/app_dio.dart';
 import 'package:pica_comic/network/res.dart';
 import 'package:html/parser.dart';
+import 'package:pica_comic/pages/pre_search_page.dart';
 import 'package:pica_comic/tools/extensions.dart';
-import 'package:pica_comic/views/pre_search_page.dart';
+import 'package:pica_comic/tools/translations.dart';
 import '../../base.dart';
 
 class HtmangaNetwork {
@@ -24,7 +25,9 @@ class HtmangaNetwork {
 
   static String get baseUrl => appdata.settings[31];
 
-  var cookieJar = CookieJar();
+  void logout() {
+    SingleInstanceCookieJar.instance?.deleteUri(Uri.parse(baseUrl));
+  }
 
   ///基本的Get请求
   Future<Res<String>> get(String url,
@@ -37,8 +40,11 @@ class HtmangaNetwork {
             "User-Agent": webUA,
             if (headers != null) ...headers
           }),
-          cookieJar: cookieJar,
+          cookieJar: SingleInstanceCookieJar.instance,
           expiredTime: cache ? CacheExpiredTime.short : CacheExpiredTime.no);
+      if(res.url.contains("users-login")){
+        return Res(null, errorMessage: "未登录或登录到期".tl);
+      }
       return Res(res.data);
     } on DioException catch (e) {
       if (e.type == DioExceptionType.connectionTimeout ||
@@ -59,7 +65,7 @@ class HtmangaNetwork {
       "User-Agent": webUA,
       "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
     }));
-    dio.interceptors.add(CookieManager(cookieJar));
+    dio.interceptors.add(CookieManagerSql(SingleInstanceCookieJar.instance!));
     try {
       var res = await dio.post(url, data: data);
       return Res(res.data);
@@ -77,7 +83,7 @@ class HtmangaNetwork {
   }
 
   ///登录
-  Future<Res<String>> login(String account, String pwd) async {
+  Future<Res<bool>> login(String account, String pwd, [bool saveData = true]) async {
     var res = await post("$baseUrl/users-check_login.html",
         "login_name=${Uri.encodeComponent(account)}&login_pass=${Uri.encodeComponent(pwd)}");
     if (res.error) {
@@ -86,10 +92,7 @@ class HtmangaNetwork {
     try {
       var json = const JsonDecoder().convert(res.data);
       if (json["html"].contains("登錄成功")) {
-        appdata.htName = account;
-        appdata.htPwd = pwd;
-        appdata.writeData();
-        return const Res("ok");
+        return const Res(true);
       }
       return Res(null, errorMessage: json["html"]);
     } catch (e) {
@@ -97,9 +100,9 @@ class HtmangaNetwork {
     }
   }
 
-  Future<Res<String>> loginFromAppdata() async {
-    if (appdata.htName == "") return const Res("ok");
-    return login(appdata.htName, appdata.htPwd);
+  Future<Res<bool>> loginFromAppdata() async {
+    var res = await htManga.reLogin();
+    return res ? const Res(true) : const Res.error("error");
   }
 
   Future<Res<HtHomePageData>> getHomePage() async {
@@ -140,7 +143,9 @@ class HtmangaNetwork {
             }
           }
           var pages = int.parse(pagesStr);
-          comics.add(HtComicBrief(name, time, image, id, pages));
+          try {
+            comics.add(HtComicBrief(name, time, image, id, pages));
+          } finally {}
         }
         comicsRes.add(comics);
       }
@@ -283,7 +288,7 @@ class HtmangaNetwork {
           document.querySelector("div.asTBcell.uwuinfo > p > font")!.text);
       var photosDom = document.querySelectorAll("div.pic_box.tb > a > img");
       var photos = List<String>.generate(photosDom.length,
-          (index) => "http:${photosDom[index].attributes["src"]!}");
+          (index) => "https:${photosDom[index].attributes["src"]!}");
       return Res(
           HtComicInfo(id, coverPath, name, category, pages, tags, description,
               uploader, avatar, uploadNum, photos));
@@ -302,7 +307,7 @@ class HtmangaNetwork {
       var document = parse(res.data);
       var photosDom = document.querySelectorAll("div.pic_box.tb > a > img");
       var photos = List<String>.generate(photosDom.length,
-          (index) => "http:${photosDom[index].attributes["src"]!}");
+          (index) => "https:${photosDom[index].attributes["src"]!}");
       return Res(photos);
     } catch (e, s) {
       LogManager.addLog(LogLevel.error, "Data Analyse", "$e\n$s");
@@ -315,14 +320,12 @@ class HtmangaNetwork {
     if (res.error) {
       return Res(null, errorMessage: res.errorMessage);
     }
-    print(res.data);
     try {
       var urls = RegExp(r"(?<=//)[\w./\[\]()-]+").allMatches(res.data);
       var images = <String>[];
       for (var url in urls) {
         images.add("https://${url[0]!}");
       }
-      print(images);
       return Res(images);
     } catch (e, s) {
       LogManager.addLog(LogLevel.error, "Data Analyse", "$e\n$s");
@@ -335,8 +338,7 @@ class HtmangaNetwork {
   /// 返回Map, 值为收藏夹名，键为ID
   Future<Res<Map<String, String>>> getFolders() async {
     var res = await get(
-        "$baseUrl/users-addfav-id-210814.html"
-        "?ajax=true&_t=${Random.secure().nextDouble()}",
+        "$baseUrl/users-addfav-id-210814.html",
         cache: false);
     if (res.error) {
       return Res(null, errorMessage: res.errorMessage);
